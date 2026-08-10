@@ -1,0 +1,8 @@
+.DS_Store
+*.log
+*.local
+
+/rainforest
+web/node_modules/
+web/dist/*
+!web/dist/.keep
