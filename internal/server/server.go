@@ -9,12 +9,19 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 
+	"github.com/lavindeep/rainforest/internal/workspace"
 	"github.com/lavindeep/rainforest/web"
 )
 
-const cookieName = "rainforest_token"
+const (
+	cookieName  = "rainforest_token"
+	maxFileSize = 1 << 20
+)
 
 type Server struct {
 	workspace string
@@ -50,6 +57,9 @@ func newWithFS(workspace, version string, dist fs.FS) (*Server, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.health)
+	mux.HandleFunc("GET /api/preflight", s.preflight)
+	mux.HandleFunc("GET /api/workspace", s.scan)
+	mux.HandleFunc("GET /api/file", s.file)
 	mux.Handle("/", staticHandler(dist))
 	s.handler = s.checkOrigin(s.requireToken(mux))
 	return s, nil
@@ -115,6 +125,105 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 		"version":   s.version,
 		"workspace": s.workspace,
 	})
+}
+
+func (s *Server) preflight(w http.ResponseWriter, _ *http.Request) {
+	terraform := map[string]any{"found": false, "path": "", "version": ""}
+	if path, err := exec.LookPath("terraform"); err == nil {
+		terraform["found"] = true
+		terraform["path"] = path
+		terraform["version"] = s.terraformVersion(path)
+	}
+	info, err := os.Stat(filepath.Join(s.workspace, ".terraform"))
+	region := os.Getenv("AWS_REGION")
+	if region == "" {
+		region = os.Getenv("AWS_DEFAULT_REGION")
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"terraform":   terraform,
+		"initialized": err == nil && info.IsDir(),
+		"awsProfile":  os.Getenv("AWS_PROFILE"),
+		"awsRegion":   region,
+	})
+}
+
+func (s *Server) terraformVersion(path string) string {
+	cmd := exec.Command(path, "version", "-json")
+	cmd.Dir = s.workspace
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	var parsed struct {
+		Version string `json:"terraform_version"`
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return ""
+	}
+	return parsed.Version
+}
+
+func (s *Server) scan(w http.ResponseWriter, _ *http.Request) {
+	result, err := workspace.Scan(s.workspace)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) file(w http.ResponseWriter, r *http.Request) {
+	rel := r.URL.Query().Get("path")
+	full, err := s.resolve(rel)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	info, err := os.Stat(full)
+	if err != nil || !info.Mode().IsRegular() {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+	if info.Size() > maxFileSize {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file too large"})
+		return
+	}
+	content, err := os.ReadFile(full)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"path": rel, "content": string(content)})
+}
+
+func (s *Server) resolve(rel string) (string, error) {
+	if rel == "" || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("invalid path")
+	}
+	for _, segment := range strings.Split(rel, "/") {
+		if segment == ".." {
+			return "", fmt.Errorf("invalid path")
+		}
+	}
+	clean := filepath.Clean(rel)
+	if ext := filepath.Ext(clean); ext != ".tf" && ext != ".tfvars" {
+		return "", fmt.Errorf("only .tf and .tfvars files can be read")
+	}
+	if first, _, _ := strings.Cut(clean, string(filepath.Separator)); first == ".terraform" {
+		return "", fmt.Errorf("invalid path")
+	}
+	root, err := filepath.EvalSymlinks(s.workspace)
+	if err != nil {
+		return "", fmt.Errorf("invalid path")
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Join(root, clean))
+	if err != nil {
+		return filepath.Join(root, clean), nil
+	}
+	if !strings.HasPrefix(resolved, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes the workspace")
+	}
+	return resolved, nil
 }
 
 func staticHandler(dist fs.FS) http.Handler {
