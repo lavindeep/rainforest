@@ -11,6 +11,14 @@ type PlanSummaryState = {
   showError: string
 }
 
+export function topologySignalForDone(
+  completedRunId: string,
+  topologyRunId: string,
+): TopologyPlanSignal['kind'] | null {
+  if (topologyRunId === '') return null
+  return topologyRunId === 'pending' || topologyRunId === completedRunId ? 'settled' : null
+}
+
 export function topologySignalForSummary(
   summary: PlanSummaryState,
 ): TopologyPlanSignal['kind'] {

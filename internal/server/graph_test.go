@@ -196,6 +196,24 @@ func TestGraphStatuses(t *testing.T) {
 			t.Errorf("body = %+v, want empty graph", body)
 		}
 	})
+	t.Run("current show failure redacts stderr", func(t *testing.T) {
+		workspace := initializedWorkspace(t)
+		stubTerraform(t, `echo 'CANARY_SENSITIVE_STDERR' >&2; exit 1`)
+		rec := get(t, newPlanTestServerIn(t, workspace), "/api/graph")
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500 (body %q)", rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "CANARY_SENSITIVE_STDERR") {
+			t.Fatalf("graph response leaked terraform stderr: %s", rec.Body.String())
+		}
+		var body map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode error response: %v", err)
+		}
+		if body["error"] != "terraform show failed" {
+			t.Errorf("error = %q, want generic terraform show failure", body["error"])
+		}
+	})
 	t.Run("current invalid json", func(t *testing.T) {
 		workspace := initializedWorkspace(t)
 		stubTerraform(t, `echo 'not json'`)

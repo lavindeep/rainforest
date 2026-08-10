@@ -276,10 +276,7 @@ func (s *Server) currentGraph(w http.ResponseWriter) {
 			writeJSON(w, http.StatusOK, emptyGraph("current"))
 			return
 		}
-		if message == "" {
-			message = waitErr.Error()
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "terraform show: " + message})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "terraform show failed"})
 		return
 	}
 	graph, err := parseCurrentGraph(stdout.Bytes())

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Preflight } from './App'
 import {
   shouldMarkTopologyRunning,
+  topologySignalForDone,
   topologySignalForSummary,
   type TopologyPlanSignal,
 } from './topology'
@@ -259,7 +260,8 @@ export default function PlanPanel({ preflight, onTopologyLifecycle }: Props) {
         close()
         setDone(completed)
         setPhase('done')
-        if (completed.state !== 'succeeded') finishTopology()
+        const topologySignal = topologySignalForDone(completed.runId, topologyRun.current)
+        if (topologySignal) finishTopology(topologySignal)
         void (async () => {
           const reconnect = await loadSummary(terminalEpoch, completed.runId)
           if (!isCurrent(terminalEpoch)) return

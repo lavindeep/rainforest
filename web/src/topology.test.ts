@@ -9,6 +9,7 @@ import {
   nodeCardDataUri,
   shouldMarkTopologyRunning,
   sourceForAddress,
+  topologySignalForDone,
   topologySignalForSummary,
 } from './topology.ts'
 import type { GraphResponse } from './topology.ts'
@@ -113,6 +114,18 @@ test('topologySignalForSummary selects Diff only for a usable changed plan', () 
   assert.equal(
     topologySignalForSummary({ state: 'failed', noChanges: false, showError: '' }),
     'settled',
+  )
+})
+
+test('done settles only the pending or matching topology run before summary selects Diff', () => {
+  assert.equal(topologySignalForDone('run-1', 'pending'), 'settled')
+  assert.equal(topologySignalForDone('run-1', 'run-1'), 'settled')
+  assert.equal(topologySignalForDone('run-1', ''), null)
+  assert.equal(topologySignalForDone('', ''), null)
+  assert.equal(topologySignalForDone('run-1', 'run-2'), null)
+  assert.equal(
+    topologySignalForSummary({ state: 'succeeded', noChanges: false, showError: '' }),
+    'changed',
   )
 })
 
