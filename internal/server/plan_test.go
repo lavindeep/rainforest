@@ -162,6 +162,7 @@ func newPlanTestServerIn(t *testing.T, workspace string) *Server {
 	mux.HandleFunc("GET /api/plan/events", s.planEvents)
 	mux.HandleFunc("DELETE /api/plan", s.cancelPlan)
 	mux.HandleFunc("GET /api/plan/summary", s.planSummary)
+	mux.HandleFunc("GET /api/graph", s.graph)
 	s.handler = s.checkOrigin(s.requireToken(mux))
 	t.Cleanup(func() {
 		if err := s.Close(); err != nil {

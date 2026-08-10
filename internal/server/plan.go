@@ -89,6 +89,7 @@ type planRun struct {
 	lineStart        int
 	truncated        bool
 	summary          *planSummary
+	graphs           *planGraphs
 	err              string
 	seq              int
 	cwd              string
@@ -194,6 +195,8 @@ func (s *Server) startPlan(w http.ResponseWriter, _ *http.Request) {
 		}
 		s.planStarts.Done()
 	}()
+	s.terraformMu.Lock()
+	defer s.terraformMu.Unlock()
 
 	terraformPath, err := exec.LookPath("terraform")
 	if err != nil {
@@ -472,8 +475,15 @@ func (s *Server) showPlan(run *planRun) (*planSummary, bool) {
 	if err != nil {
 		return &planSummary{Changes: []planChange{}, ShowError: "terraform show JSON: " + err.Error()}, false
 	}
+	graphs, err := parsePlanGraphs(raw.Bytes())
+	if err != nil {
+		return &planSummary{Changes: []planChange{}, ShowError: "terraform show JSON: " + err.Error()}, false
+	}
 	s.planMu.Lock()
 	canceled = run.cancelRequested
+	if !canceled {
+		run.graphs = graphs
+	}
 	s.planMu.Unlock()
 	if canceled {
 		return nil, true

@@ -531,3 +531,19 @@ body {
 .plan-badge.other {
   color: var(--muted);
 }
+
+.topology-pane-body {
+  padding: 0;
+  overflow: hidden;
+}
+
+.work-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.work-content[hidden] {
+  display: none;
+}

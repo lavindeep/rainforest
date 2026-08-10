@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Preflight } from './App'
+import {
+  shouldMarkTopologyRunning,
+  topologySignalForSummary,
+  type TopologyPlanSignal,
+} from './topology'
 
 type Line = { runId: string; seq: number; stream: string; text: string }
 type Counts = { add: number; change: number; destroy: number }
@@ -51,7 +56,12 @@ function blockedReason(preflight: Preflight | null) {
   return ''
 }
 
-export default function PlanPanel({ preflight }: { preflight: Preflight | null }) {
+type Props = {
+  preflight: Preflight | null
+  onTopologyLifecycle: (kind: TopologyPlanSignal['kind']) => void
+}
+
+export default function PlanPanel({ preflight, onTopologyLifecycle }: Props) {
   const [phase, setPhase] = useState<Phase>('connecting')
   const [lines, setLines] = useState<Line[]>([])
   const [truncated, setTruncated] = useState(false)
@@ -71,6 +81,26 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
   const generation = useRef(0)
   const runRevision = useRef(0)
   const connectRef = useRef<(epoch: number) => void>(() => undefined)
+  const topologyRun = useRef('')
+  const topologySummary = useRef('')
+
+  const markTopologyRunning = useCallback(
+    (runId: string) => {
+      if (!shouldMarkTopologyRunning(runId, topologySummary.current)) return
+      if (topologyRun.current === '') onTopologyLifecycle('running')
+      topologyRun.current = runId || 'pending'
+    },
+    [onTopologyLifecycle],
+  )
+
+  const finishTopology = useCallback(
+    (kind: TopologyPlanSignal['kind'] = 'settled') => {
+      if (topologyRun.current === '') return
+      topologyRun.current = ''
+      onTopologyLifecycle(kind)
+    },
+    [onTopologyLifecycle],
+  )
 
   const isCurrent = useCallback(
     (epoch: number) => mounted.current && generation.current === epoch,
@@ -110,6 +140,7 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
         if (!isCurrent(epoch)) return false
         if (expectedRunId !== '' && expectedRunId !== activeRun.current) return false
         if (response.status === 404) {
+          finishTopology()
           activeRun.current = ''
           setNotice('')
           setError('')
@@ -122,6 +153,7 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
             adoptRunUI()
           }
           activeRun.current = running.runId ?? ''
+          markTopologyRunning(running.runId ?? 'pending')
           setNotice(
             running.runId
               ? `reconnected to running plan ${running.runId}`
@@ -132,6 +164,7 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
           return true
         }
         if (!response.ok) {
+          finishTopology()
           setError((body as { error?: string }).error ?? `summary failed (${response.status})`)
           return false
         }
@@ -151,14 +184,20 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
         })
         setArgv(result.run.argv)
         setPhase('done')
+        if (topologySummary.current !== result.runId) {
+          topologySummary.current = result.runId
+          topologyRun.current = ''
+          onTopologyLifecycle(topologySignalForSummary(result))
+        }
         return changedRun
       } catch {
         if (!isCurrent(epoch)) return false
+        finishTopology()
         setError('summary request failed — could not reach the server')
         return false
       }
     },
-    [adoptRunUI, isCurrent],
+    [adoptRunUI, finishTopology, isCurrent, markTopologyRunning, onTopologyLifecycle],
   )
 
   const connect = useCallback(
@@ -174,6 +213,7 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
 
       events.addEventListener('none', () => {
         if (!isCurrent(epoch) || source.current !== events) return
+        finishTopology()
         setLost(false)
         setNotice('')
         setError('')
@@ -189,6 +229,7 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
           setPhase('running')
         }
         activeRun.current = truncatedRun.runId
+        markTopologyRunning(truncatedRun.runId)
         setLost(false)
         setTruncated(true)
       })
@@ -198,6 +239,7 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
         const changedRun = activeRun.current !== '' && activeRun.current !== line.runId
         if (changedRun) adoptRunUI()
         activeRun.current = line.runId
+        markTopologyRunning(line.runId)
         setLost(false)
         setPhase((current) => (changedRun || current !== 'done' ? 'running' : current))
         if (line.seq > MAX_LINES) setTruncated(true)
@@ -217,6 +259,7 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
         close()
         setDone(completed)
         setPhase('done')
+        if (completed.state !== 'succeeded') finishTopology()
         void (async () => {
           const reconnect = await loadSummary(terminalEpoch, completed.runId)
           if (!isCurrent(terminalEpoch)) return
@@ -228,7 +271,15 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
         setLost(true)
       }
     },
-    [adoptRunUI, closeCurrent, isCurrent, loadSummary, nextGeneration],
+    [
+      adoptRunUI,
+      closeCurrent,
+      finishTopology,
+      isCurrent,
+      loadSummary,
+      markTopologyRunning,
+      nextGeneration,
+    ],
   )
 
   useEffect(() => {
@@ -268,6 +319,7 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
       if (!isCurrent(epoch)) return
       if (response.status === 202) {
         activeRun.current = body.runId ?? ''
+        topologyRun.current = body.runId ?? topologyRun.current
         setNotice('')
         setArgv(body.argv ?? DEFAULT_ARGV)
         connect(epoch)
@@ -275,16 +327,19 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
       }
       if (response.status === 409 && body.runId) {
         activeRun.current = body.runId
+        markTopologyRunning(body.runId)
         setNotice(`a plan is already running — showing run ${body.runId}`)
         connect(epoch)
         return
       }
       activeRun.current = ''
+      finishTopology()
       setError(body.error ?? `plan failed to start (${response.status})`)
       setPhase('idle')
     } catch {
       if (!isCurrent(epoch)) return
       activeRun.current = ''
+      finishTopology()
       setError('plan request failed — could not reach the server')
       setPhase('idle')
     }
@@ -296,6 +351,8 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
     activeRun.current = 'pending'
     resetRunUI()
     setPhase('running')
+    topologyRun.current = 'pending'
+    onTopologyLifecycle('running')
     void start(epoch)
   }
 

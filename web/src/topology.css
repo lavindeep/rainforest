@@ -1,0 +1,151 @@
+.topology {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.topology-toolbar {
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.topology-view {
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.topology-view:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.topology-view.current {
+  border-color: var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.topology-view:focus-visible,
+.topology-resource select:focus-visible,
+.topology-detail button:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+.topology-view:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.topology-resource {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.topology-resource select {
+  max-width: 210px;
+  min-width: 0;
+  padding: 4px 24px 4px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+}
+
+.topology-resource select:disabled {
+  color: var(--muted);
+  opacity: 0.55;
+}
+
+.topology-stage,
+.topology-canvas {
+  flex: 1;
+  min-height: 0;
+}
+
+.topology-stage {
+  position: relative;
+}
+
+.topology-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.topology-status {
+  position: absolute;
+  inset: 50% 16px auto;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.topology-detail {
+  position: absolute;
+  z-index: 3;
+  right: 12px;
+  bottom: 12px;
+  left: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgb(17 18 20 / 94%);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 25%);
+}
+
+.topology-detail-text {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 2px;
+}
+
+.topology-detail-type,
+.topology-detail code,
+.topology-source-unavailable {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.topology-detail code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topology-detail button {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
