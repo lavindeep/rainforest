@@ -112,6 +112,7 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
         if (response.status === 404) {
           activeRun.current = ''
           setNotice('')
+          setError('')
           setPhase('idle')
           return false
         }
@@ -126,6 +127,7 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
               ? `reconnected to running plan ${running.runId}`
               : 'plan still running — summary not ready yet',
           )
+          setError('')
           setPhase('running')
           return true
         }
@@ -138,6 +140,7 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
         if (changedRun) adoptRunUI()
         activeRun.current = result.runId
         setNotice('')
+        setError('')
         setSummary(result)
         setDone({
           runId: result.runId,
@@ -173,6 +176,7 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
         if (!isCurrent(epoch) || source.current !== events) return
         setLost(false)
         setNotice('')
+        setError('')
         close()
         setPhase('idle')
       })
@@ -209,6 +213,7 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
         activeRun.current = completed.runId
         setLost(false)
         setNotice('')
+        setError('')
         close()
         setDone(completed)
         setPhase('done')
