@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import './app.css'
+import PlanPanel from './PlanPanel'
 import Sidebar from './Sidebar'
 import SourceView from './SourceView'
 
@@ -46,6 +47,7 @@ export default function App() {
   const [scan, setScan] = useState<Scan | null>(null)
   const [source, setSource] = useState<Source | null>(null)
   const [line, setLine] = useState(0)
+  const [tab, setTab] = useState<'plan' | 'source'>('plan')
 
   useEffect(() => {
     getJSON<Health>('/api/health').then(setHealth)
@@ -55,6 +57,7 @@ export default function App() {
 
   function select(path: string, at: number) {
     setLine(at)
+    setTab('source')
     getJSON<Source>(`/api/file?path=${encodeURIComponent(path)}`).then(setSource)
   }
 
@@ -80,11 +83,25 @@ export default function App() {
 
         <section className="pane" style={{ width: '66%' }}>
           <header className="pane-header">Work</header>
+          <div className="tabs">
+            {(['plan', 'source'] as const).map((name) => (
+              <button
+                key={name}
+                type="button"
+                className={name === tab ? 'tab current' : 'tab'}
+                onClick={() => setTab(name)}
+              >
+                {name === 'plan' ? 'Plan' : 'Source'}
+              </button>
+            ))}
+          </div>
           <div className="pane-body">
-            {source ? (
+            {tab === 'plan' ? (
+              <PlanPanel preflight={preflight} />
+            ) : source ? (
               <SourceView path={source.path} content={source.content} line={line} />
             ) : (
-              <p className="empty">Source, diffs and Terraform output appear here</p>
+              <p className="empty">Select a file in the navigator to read its source</p>
             )}
           </div>
         </section>
