@@ -340,8 +340,8 @@ export default function PlanPanel({ preflight }: { preflight: Preflight | null }
       {notice && <p className="plan-notice">{notice}</p>}
       {lost && <p className="plan-notice">connection lost — reconnecting…</p>}
 
-      {phase === 'idle' && lines.length === 0 ? (
-        <p className="empty">No plan has been run yet.</p>
+      {(phase === 'idle' || phase === 'connecting') && lines.length === 0 && !truncated ? (
+        <p className="empty">{phase === 'idle' ? 'No plan has been run yet.' : 'Connecting…'}</p>
       ) : (
         <div className="plan-log" ref={log} onScroll={onScroll}>
           {truncated && <div className="plan-line dropped">…earlier output dropped…</div>}
