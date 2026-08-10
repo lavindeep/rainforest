@@ -9,16 +9,43 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
-const maxPlanLines = 10000
+const (
+	maxPlanLines   = 10000
+	planTempPrefix = "rainforest-plan-"
+)
+
+var (
+	closeGrace            = 3 * time.Second
+	killGrace             = 3 * time.Second
+	errProcessNotStarted  = errors.New("process not started")
+	planStartHandoff      func()
+	planCancelHandoff     func()
+	planShowHandoff       func()
+	planShowReapedHandoff func()
+)
+
+type planPhase uint8
+
+const (
+	planPhaseStarting planPhase = iota
+	planPhaseRunning
+	planPhaseReaped
+	planPhaseShowRunning
+	planPhaseShowReaped
+	planPhaseTerminal
+)
 
 type planLine struct {
 	Seq    int    `json:"seq"`
@@ -45,6 +72,12 @@ type planSummary struct {
 	ShowError string
 }
 
+type planSubscriber struct {
+	notify    chan struct{}
+	cursor    int
+	truncated bool
+}
+
 type planRun struct {
 	id               string
 	state            string
@@ -65,10 +98,66 @@ type planRun struct {
 	tempDir          string
 	cmd              *exec.Cmd
 	pid              int
+	phase            planPhase
+	stdout           io.ReadCloser
+	stderr           io.ReadCloser
+	closePipesOnce   sync.Once
+	closePipesErr    error
+	pipesAbandoned   bool
 	cancelRequested  bool
 	intSent          bool
-	subscribers      map[chan struct{}]struct{}
+	subscribers      map[*planSubscriber]struct{}
 	done             chan struct{}
+}
+
+func sweepPlanTempDirs() {
+	tempDir := os.TempDir()
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		log.Printf("sweep plan temp directories: %v", err)
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, ok := planTempDirPID(entry.Name())
+		if !ok {
+			continue
+		}
+		err := syscall.Kill(pid, 0)
+		if err == nil || errors.Is(err, syscall.EPERM) {
+			continue
+		}
+		if !errors.Is(err, syscall.ESRCH) {
+			log.Printf("check plan temp directory %s: %v", entry.Name(), err)
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(tempDir, entry.Name())); err != nil {
+			log.Printf("remove stale plan temp directory %s: %v", entry.Name(), err)
+		}
+	}
+}
+
+func planTempDirPID(name string) (int, bool) {
+	remainder, ok := strings.CutPrefix(name, planTempPrefix)
+	if !ok {
+		return 0, false
+	}
+	pidText, suffix, ok := strings.Cut(remainder, "-")
+	if !ok || pidText == "" || suffix == "" {
+		return 0, false
+	}
+	for i := range len(pidText) {
+		if pidText[i] < '0' || pidText[i] > '9' {
+			return 0, false
+		}
+	}
+	pid, err := strconv.Atoi(pidText)
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
 }
 
 func (s *Server) startPlan(w http.ResponseWriter, _ *http.Request) {
@@ -121,7 +210,7 @@ func (s *Server) startPlan(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "server is closed"})
 		return
 	}
-	tempDir, err := os.MkdirTemp("", "rainforest-plan-")
+	tempDir, err := os.MkdirTemp("", planTempPrefix+strconv.Itoa(os.Getpid())+"-")
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -156,7 +245,8 @@ func (s *Server) startPlan(w http.ResponseWriter, _ *http.Request) {
 		planFile:         planFile,
 		tempDir:          tempDir,
 		cmd:              cmd,
-		subscribers:      make(map[chan struct{}]struct{}),
+		phase:            planPhaseStarting,
+		subscribers:      make(map[*planSubscriber]struct{}),
 		done:             make(chan struct{}),
 	}
 	stdout, err := cmd.StdoutPipe()
@@ -172,6 +262,8 @@ func (s *Server) startPlan(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	run.stdout = stdout
+	run.stderr = stderr
 	if previousTempDir != "" {
 		if err := os.RemoveAll(previousTempDir); err != nil {
 			_ = stdout.Close()
@@ -194,7 +286,11 @@ func (s *Server) startPlan(w http.ResponseWriter, _ *http.Request) {
 	s.plan = run
 	s.planStarting = false
 	reservationActive = false
+	if planStartHandoff != nil {
+		planStartHandoff()
+	}
 	if err := cmd.Start(); err != nil {
+		run.phase = planPhaseTerminal
 		s.planMu.Unlock()
 		_ = stdout.Close()
 		_ = stderr.Close()
@@ -203,6 +299,7 @@ func (s *Server) startPlan(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	run.pid = cmd.Process.Pid
+	run.phase = planPhaseRunning
 	s.planMu.Unlock()
 	go s.executePlan(run, stdout, stderr)
 	writeJSON(w, http.StatusAccepted, map[string]any{"runId": id, "argv": argv, "cwd": s.workspace})
@@ -234,7 +331,13 @@ func (s *Server) executePlan(run *planRun, stdout, stderr io.ReadCloser) {
 	go func() { errs <- s.scanPlanStream(run, stderr, "stderr") }()
 	firstScanErr := <-errs
 	secondScanErr := <-errs
+	_ = run.closePipes()
 	waitErr := run.cmd.Wait()
+	s.planMu.Lock()
+	run.pid = 0
+	run.phase = planPhaseReaped
+	canceled := run.cancelRequested
+	s.planMu.Unlock()
 	if firstScanErr != nil {
 		s.appendPlanLine(run, "system", firstScanErr.Error())
 	}
@@ -246,10 +349,6 @@ func (s *Server) executePlan(run *planRun, stdout, stderr io.ReadCloser) {
 		scanErr = secondScanErr
 	}
 	exitCode := planExitCode(waitErr)
-
-	s.planMu.Lock()
-	canceled := run.cancelRequested
-	s.planMu.Unlock()
 	if scanErr != nil {
 		s.finishPlan(run, "error", exitCode, scanErr.Error(), nil)
 		return
@@ -268,6 +367,9 @@ func (s *Server) executePlan(run *planRun, stdout, stderr io.ReadCloser) {
 		return
 	}
 
+	if planShowHandoff != nil {
+		planShowHandoff()
+	}
 	summary, canceled := s.showPlan(run)
 	if canceled {
 		s.finishPlan(run, "canceled", 0, "", nil)
@@ -282,7 +384,6 @@ func (s *Server) executePlan(run *planRun, stdout, stderr io.ReadCloser) {
 }
 
 func (s *Server) scanPlanStream(run *planRun, reader io.ReadCloser, stream string) error {
-	defer reader.Close()
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -291,12 +392,33 @@ func (s *Server) scanPlanStream(run *planRun, reader io.ReadCloser, stream strin
 	if err := scanner.Err(); err != nil {
 		message := stream + " scanner: " + err.Error()
 		s.planMu.Lock()
-		pid := run.pid
+		abandoned := run.pipesAbandoned
+		pid := 0
+		if planProcessRunningLocked(run) {
+			pid = run.pid
+		}
 		s.planMu.Unlock()
+		if abandoned {
+			return nil
+		}
 		_ = signalProcessGroup(pid, syscall.SIGKILL)
 		return errors.New(message)
 	}
 	return nil
+}
+
+func (run *planRun) closePipes() error {
+	run.closePipesOnce.Do(func() {
+		var stdoutErr, stderrErr error
+		if run.stdout != nil {
+			stdoutErr = run.stdout.Close()
+		}
+		if run.stderr != nil {
+			stderrErr = run.stderr.Close()
+		}
+		run.closePipesErr = errors.Join(stdoutErr, stderrErr)
+	})
+	return run.closePipesErr
 }
 
 func (s *Server) showPlan(run *planRun) (*planSummary, bool) {
@@ -322,28 +444,39 @@ func (s *Server) showPlan(run *planRun) (*planSummary, bool) {
 		}
 		return &planSummary{Changes: []planChange{}, ShowError: "terraform show start: " + err.Error()}, false
 	}
-	if err := cmd.Wait(); err != nil {
-		s.planMu.Lock()
-		canceled := run.cancelRequested
-		s.planMu.Unlock()
+	waitErr := cmd.Wait()
+	s.planMu.Lock()
+	run.pid = 0
+	run.phase = planPhaseShowReaped
+	s.planMu.Unlock()
+	if planShowReapedHandoff != nil {
+		planShowReapedHandoff()
+	}
+	s.planMu.Lock()
+	canceled = run.cancelRequested
+	s.planMu.Unlock()
+	if waitErr != nil {
 		if canceled {
 			return nil, true
 		}
-		message := "terraform show: " + err.Error()
+		message := "terraform show: " + waitErr.Error()
 		if text := strings.TrimSpace(stderr.String()); text != "" {
 			message += ": " + text
 		}
 		return &planSummary{Changes: []planChange{}, ShowError: message}, false
 	}
-	s.planMu.Lock()
-	canceled = run.cancelRequested
-	s.planMu.Unlock()
 	if canceled {
 		return nil, true
 	}
 	summary, err := parsePlanSummary(raw.Bytes())
 	if err != nil {
 		return &planSummary{Changes: []planChange{}, ShowError: "terraform show JSON: " + err.Error()}, false
+	}
+	s.planMu.Lock()
+	canceled = run.cancelRequested
+	s.planMu.Unlock()
+	if canceled {
+		return nil, true
 	}
 	return summary, false
 }
@@ -359,6 +492,7 @@ func (s *Server) startShowProcess(run *planRun, cmd *exec.Cmd, start func() erro
 		return false, err
 	}
 	run.pid = cmd.Process.Pid
+	run.phase = planPhaseShowRunning
 	return false, nil
 }
 
@@ -444,12 +578,18 @@ func (s *Server) finishPlan(run *planRun, state string, exitCode int, message st
 	if run.state != "running" {
 		return
 	}
+	if run.cancelRequested {
+		state = "canceled"
+		message = ""
+		summary = nil
+	}
 	run.state = state
 	run.exitCode = exitCode
 	run.finishedAt = time.Now()
 	run.err = message
 	run.summary = summary
 	run.pid = 0
+	run.phase = planPhaseTerminal
 	s.notifyPlanSubscribersLocked(run)
 	close(run.done)
 }
@@ -457,7 +597,7 @@ func (s *Server) finishPlan(run *planRun, state string, exitCode int, message st
 func (s *Server) notifyPlanSubscribersLocked(run *planRun) {
 	for subscriber := range run.subscribers {
 		select {
-		case subscriber <- struct{}{}:
+		case subscriber.notify <- struct{}{}:
 		default:
 		}
 	}
@@ -474,9 +614,7 @@ func (s *Server) planEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	var run *planRun
-	var subscriber chan struct{}
-	lastSeq := 0
-	first := true
+	var subscriber *planSubscriber
 	defer func() {
 		if run == nil || subscriber == nil {
 			return
@@ -496,30 +634,33 @@ func (s *Server) planEvents(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
+			subscriber = &planSubscriber{notify: make(chan struct{}, 1)}
 			if run.state == "running" {
-				subscriber = make(chan struct{}, 1)
 				run.subscribers[subscriber] = struct{}{}
 			}
 		}
-		ordered := orderedPlanLinesLocked(run)
-		lines := make([]planLine, 0, len(ordered))
-		for _, line := range ordered {
-			if line.Seq > lastSeq {
-				lines = append(lines, line)
+		oldestSeq := oldestPlanSeqLocked(run)
+		gap := run.truncated && oldestSeq > 0 && subscriber.cursor < oldestSeq-1
+		sendTruncated := false
+		if gap {
+			subscriber.cursor = oldestSeq - 1
+			if !subscriber.truncated {
+				subscriber.truncated = true
+				sendTruncated = true
 			}
 		}
-		gap := run.truncated && (first || len(ordered) > 0 && lastSeq < ordered[0].Seq-1)
+		line, hasLine := nextPlanLineLocked(run, subscriber.cursor)
 		terminal := run.state != "running"
 		done := planDoneLocked(run)
 		s.planMu.Unlock()
 
-		if gap {
+		if sendTruncated {
 			if err := writePlanEvent(w, flusher, "truncated", map[string]string{"runId": run.id}); err != nil {
 				return
 			}
+			continue
 		}
-		first = false
-		for _, line := range lines {
+		if hasLine {
 			payload := struct {
 				RunID string `json:"runId"`
 				planLine
@@ -527,7 +668,8 @@ func (s *Server) planEvents(w http.ResponseWriter, r *http.Request) {
 			if err := writePlanEvent(w, flusher, "line", payload); err != nil {
 				return
 			}
-			lastSeq = line.Seq
+			subscriber.cursor = line.Seq
+			continue
 		}
 		if terminal {
 			if err := writePlanEvent(w, flusher, "done", done); err != nil {
@@ -536,23 +678,37 @@ func (s *Server) planEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		select {
-		case <-subscriber:
+		case <-subscriber.notify:
 		case <-r.Context().Done():
 			return
 		}
 	}
 }
 
-func orderedPlanLinesLocked(run *planRun) []planLine {
-	lines := make([]planLine, len(run.lines))
-	if !run.truncated {
-		copy(lines, run.lines)
-		return lines
+func oldestPlanSeqLocked(run *planRun) int {
+	if len(run.lines) == 0 {
+		return 0
 	}
-	for i := range run.lines {
-		lines[i] = run.lines[(run.lineStart+i)%len(run.lines)]
+	if run.truncated {
+		return run.lines[run.lineStart].Seq
 	}
-	return lines
+	return run.lines[0].Seq
+}
+
+func nextPlanLineLocked(run *planRun, cursor int) (planLine, bool) {
+	oldestSeq := oldestPlanSeqLocked(run)
+	if oldestSeq == 0 || cursor >= run.seq {
+		return planLine{}, false
+	}
+	nextSeq := cursor + 1
+	if nextSeq < oldestSeq {
+		nextSeq = oldestSeq
+	}
+	index := nextSeq - oldestSeq
+	if run.truncated {
+		index = (run.lineStart + index) % len(run.lines)
+	}
+	return run.lines[index], true
 }
 
 func writePlanEvent(w http.ResponseWriter, flusher http.Flusher, name string, data any) error {
@@ -589,6 +745,9 @@ func planDoneLocked(run *planRun) any {
 }
 
 func (s *Server) cancelPlan(w http.ResponseWriter, _ *http.Request) {
+	if planCancelHandoff != nil {
+		planCancelHandoff()
+	}
 	s.planMu.Lock()
 	if s.plan == nil || s.plan.state != "running" {
 		s.planMu.Unlock()
@@ -596,6 +755,11 @@ func (s *Server) cancelPlan(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	run := s.plan
+	if !planProcessRunningLocked(run) {
+		s.planMu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "plan is already finishing"})
+		return
+	}
 	signal := syscall.SIGINT
 	signalName := "SIGINT"
 	if run.intSent {
@@ -612,6 +776,10 @@ func (s *Server) cancelPlan(w http.ResponseWriter, _ *http.Request) {
 	s.planMu.Unlock()
 
 	if signalErr != nil {
+		if errors.Is(signalErr, syscall.ESRCH) || errors.Is(signalErr, errProcessNotStarted) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "plan is already finishing"})
+			return
+		}
 		message := signalName + ": " + signalErr.Error()
 		s.appendPlanLine(run, "system", message)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": message, "runId": run.id})
@@ -620,9 +788,13 @@ func (s *Server) cancelPlan(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]string{"runId": run.id, "signal": signalName})
 }
 
+func planProcessRunningLocked(run *planRun) bool {
+	return run.pid > 0 && (run.phase == planPhaseRunning || run.phase == planPhaseShowRunning)
+}
+
 func signalProcessGroup(pid int, signal syscall.Signal) error {
 	if pid == 0 {
-		return errors.New("process not started")
+		return errProcessNotStarted
 	}
 	return syscall.Kill(-pid, signal)
 }
@@ -699,21 +871,61 @@ func (s *Server) closePlan() error {
 	}
 	tempDir := run.tempDir
 	done := run.done
-	pid := run.pid
 	running := run.state == "running"
 	if running {
 		run.cancelRequested = true
 	}
 	var signalErr error
-	if running {
-		if err := signalProcessGroup(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) && err.Error() != "process not started" {
+	if running && planProcessRunningLocked(run) {
+		if err := signalProcessGroup(run.pid, syscall.SIGINT); err == nil {
+			run.intSent = true
+		} else if !errors.Is(err, syscall.ESRCH) && !errors.Is(err, errProcessNotStarted) {
 			signalErr = err
 		}
 	}
 	s.planMu.Unlock()
 
 	if running {
-		<-done
+		timer := time.NewTimer(closeGrace)
+		select {
+		case <-done:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		case <-timer.C:
+			s.planMu.Lock()
+			if run.state == "running" && planProcessRunningLocked(run) {
+				if err := signalProcessGroup(run.pid, syscall.SIGKILL); err != nil &&
+					!errors.Is(err, syscall.ESRCH) && !errors.Is(err, errProcessNotStarted) {
+					signalErr = errors.Join(signalErr, err)
+				}
+			}
+			s.planMu.Unlock()
+			killTimer := time.NewTimer(killGrace)
+			select {
+			case <-done:
+				if !killTimer.Stop() {
+					select {
+					case <-killTimer.C:
+					default:
+					}
+				}
+			case <-killTimer.C:
+				s.planMu.Lock()
+				abandon := run.state == "running"
+				if abandon {
+					run.pipesAbandoned = true
+				}
+				s.planMu.Unlock()
+				if abandon {
+					log.Printf("plan %s did not stop after SIGKILL; abandoning plan output and shutdown wait", run.id)
+					signalErr = errors.Join(signalErr, run.closePipes())
+				}
+			}
+		}
 	}
 	removeErr := os.RemoveAll(tempDir)
 	return errors.Join(signalErr, removeErr)

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -122,6 +123,21 @@ type blockingCompletionRecorder struct {
 	doneOnce     sync.Once
 }
 
+type blockingFlushRecorder struct {
+	*httptest.ResponseRecorder
+	flushStarted chan struct{}
+	allowFlush   chan struct{}
+	flushOnce    sync.Once
+}
+
+func (w *blockingFlushRecorder) Flush() {
+	w.ResponseRecorder.Flush()
+	w.flushOnce.Do(func() {
+		close(w.flushStarted)
+		<-w.allowFlush
+	})
+}
+
 func (w *blockingCompletionRecorder) Write(p []byte) (int, error) {
 	w.startOnce.Do(func() { close(w.writeStarted) })
 	<-w.allowWrite
@@ -147,7 +163,11 @@ func newPlanTestServerIn(t *testing.T, workspace string) *Server {
 	mux.HandleFunc("DELETE /api/plan", s.cancelPlan)
 	mux.HandleFunc("GET /api/plan/summary", s.planSummary)
 	s.handler = s.checkOrigin(s.requireToken(mux))
-	t.Cleanup(func() { _ = s.Close() })
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
 	return s
 }
 
@@ -275,6 +295,90 @@ func waitForFile(t *testing.T, path string) {
 			t.Fatalf("file %s was not created", path)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func waitForProcessExit(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("check process %d: %v", pid, err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("process %d still exists", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestPlanPipeHolderProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_PLAN_PIPE_HOLDER") != "1" {
+		return
+	}
+	if _, err := syscall.Setsid(); err != nil {
+		t.Fatalf("setsid: %v", err)
+	}
+	pidFile := os.Getenv("PLAN_PIPE_HOLDER_PID_FILE")
+	tempPIDFile := pidFile + ".tmp-" + strconv.Itoa(os.Getpid())
+	if err := os.WriteFile(tempPIDFile, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatalf("write PID file: %v", err)
+	}
+	if err := os.Rename(tempPIDFile, pidFile); err != nil {
+		t.Fatalf("publish PID file: %v", err)
+	}
+	for {
+		time.Sleep(time.Hour)
+	}
+}
+
+func TestNewSweepsOnlyDeadPIDPlanTempDirs(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("TMPDIR", tempDir)
+
+	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start dead PID process: %v", err)
+	}
+	deadPID := cmd.Process.Pid
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait for dead PID process: %v", err)
+	}
+	if err := syscall.Kill(deadPID, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("PID %d is not dead: %v", deadPID, err)
+	}
+
+	deadDir := filepath.Join(tempDir, "rainforest-plan-"+strconv.Itoa(deadPID)+"-dead")
+	aliveDir := filepath.Join(tempDir, "rainforest-plan-"+strconv.Itoa(os.Getpid())+"-alive")
+	legacyDir := filepath.Join(tempDir, "rainforest-plan-xyz")
+	plusPIDDir := filepath.Join(tempDir, "rainforest-plan-+"+strconv.Itoa(deadPID)+"-invalid")
+	for _, dir := range []string{deadDir, aliveDir, legacyDir, plusPIDDir} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	s, err := New(t.TempDir(), "test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
+
+	if _, err := os.Stat(deadDir); !os.IsNotExist(err) {
+		t.Errorf("dead PID temp dir stat error = %v, want not exist", err)
+	}
+	for _, dir := range []string{aliveDir, legacyDir, plusPIDDir} {
+		if _, err := os.Stat(dir); err != nil {
+			t.Errorf("preserved temp dir %s stat error = %v", dir, err)
+		}
 	}
 }
 
@@ -569,6 +673,188 @@ esac`)
 	}
 }
 
+func TestCloseInterruptsCooperativePlanBeforeGrace(t *testing.T) {
+	oldCloseGrace := closeGrace
+	closeGrace = 2 * time.Second
+	t.Cleanup(func() { closeGrace = oldCloseGrace })
+
+	workspace := initializedWorkspace(t)
+	planScript(t, `trap ': > "$PWD/interrupted"; exit 130' INT
+: > "$PWD/ready"
+while :; do /bin/sleep 1; done`, `echo '{"resource_changes":[]}'`)
+	s := newPlanTestServerIn(t, workspace)
+	startPlan(t, s)
+	waitForFile(t, filepath.Join(workspace, "ready"))
+
+	startedAt := time.Now()
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	elapsed := time.Since(startedAt)
+	if _, err := os.Stat(filepath.Join(workspace, "interrupted")); err != nil {
+		t.Errorf("interrupt marker stat error = %v, want marker", err)
+	}
+	if elapsed >= closeGrace {
+		t.Errorf("Close elapsed = %s, want less than grace %s", elapsed, closeGrace)
+	}
+}
+
+func TestCloseEscalatesToKillAfterGrace(t *testing.T) {
+	oldCloseGrace := closeGrace
+	oldKillGrace := killGrace
+	closeGrace = 200 * time.Millisecond
+	killGrace = 200 * time.Millisecond
+	t.Cleanup(func() {
+		closeGrace = oldCloseGrace
+		killGrace = oldKillGrace
+	})
+
+	workspace := initializedWorkspace(t)
+	planScript(t, `trap '' INT
+echo $$ > "$PWD/plan-pid"
+/bin/sleep 30 &
+child_pid=$!
+echo "$child_pid" > "$PWD/child-pid"
+: > "$PWD/ready"
+wait "$child_pid"`, `echo '{"resource_changes":[]}'`)
+	s := newPlanTestServerIn(t, workspace)
+	started := startPlan(t, s)
+	waitForFile(t, filepath.Join(workspace, "ready"))
+	rawPID, err := os.ReadFile(filepath.Join(workspace, "plan-pid"))
+	if err != nil {
+		t.Fatalf("read plan PID: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	if err != nil {
+		t.Fatalf("parse plan PID %q: %v", rawPID, err)
+	}
+	rawChildPID, err := os.ReadFile(filepath.Join(workspace, "child-pid"))
+	if err != nil {
+		t.Fatalf("read child PID: %v", err)
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(rawChildPID)))
+	if err != nil {
+		t.Fatalf("parse child PID %q: %v", rawChildPID, err)
+	}
+	tempDir := filepath.Dir(strings.TrimPrefix(started.Argv[len(started.Argv)-1], "-out="))
+
+	closeDone := make(chan error, 1)
+	startedAt := time.Now()
+	go func() { closeDone <- s.Close() }()
+	upperBound := closeGrace + killGrace + 2*time.Second
+	var closeErr error
+	select {
+	case closeErr = <-closeDone:
+	case <-time.After(upperBound):
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		select {
+		case <-closeDone:
+		case <-time.After(5 * time.Second):
+		}
+		t.Fatalf("Close did not return within %s", upperBound)
+	}
+	if closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
+	}
+	if elapsed := time.Since(startedAt); elapsed < closeGrace || elapsed > upperBound {
+		t.Errorf("Close elapsed = %s, want between %s and %s", elapsed, closeGrace, upperBound)
+	}
+	waitForProcessExit(t, pid)
+	waitForProcessExit(t, childPID)
+	if _, err := os.Stat(tempDir); !os.IsNotExist(err) {
+		t.Errorf("plan temp dir stat error = %v, want not exist", err)
+	}
+}
+
+func TestCloseReturnsWhenDetachedChildHoldsPlanPipes(t *testing.T) {
+	oldCloseGrace := closeGrace
+	oldKillGrace := killGrace
+	closeGrace = 100 * time.Millisecond
+	killGrace = 100 * time.Millisecond
+	t.Cleanup(func() {
+		closeGrace = oldCloseGrace
+		killGrace = oldKillGrace
+	})
+
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatalf("test executable: %v", err)
+	}
+	workspace := initializedWorkspace(t)
+	holderPIDFile := filepath.Join(workspace, "holder-pid")
+	t.Setenv("GO_WANT_PLAN_PIPE_HOLDER", "1")
+	t.Setenv("PLAN_PIPE_HOLDER_PID_FILE", holderPIDFile)
+	t.Setenv("PLAN_PIPE_HOLDER_BINARY", testBinary)
+	planScript(t, `trap '' INT
+"$PLAN_PIPE_HOLDER_BINARY" -test.run '^TestPlanPipeHolderProcess$' &
+: > "$PWD/ready"
+while :; do /bin/sleep 1; done`, `echo '{"resource_changes":[]}'`)
+	s := newPlanTestServerIn(t, workspace)
+	started := startPlan(t, s)
+	waitForFile(t, filepath.Join(workspace, "ready"))
+	waitForFile(t, holderPIDFile)
+	rawHolderPID, err := os.ReadFile(holderPIDFile)
+	if err != nil {
+		t.Fatalf("read holder PID: %v", err)
+	}
+	holderPID, err := strconv.Atoi(strings.TrimSpace(string(rawHolderPID)))
+	if err != nil {
+		t.Fatalf("parse holder PID %q: %v", rawHolderPID, err)
+	}
+	cleanupHolder := func() {
+		if err := syscall.Kill(holderPID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			t.Errorf("kill pipe holder %d: %v", holderPID, err)
+		}
+		waitForProcessExit(t, holderPID)
+	}
+	holderCleaned := false
+	t.Cleanup(func() {
+		if !holderCleaned {
+			cleanupHolder()
+		}
+	})
+
+	var logOutput bytes.Buffer
+	oldLogOutput := log.Writer()
+	log.SetOutput(&logOutput)
+	t.Cleanup(func() { log.SetOutput(oldLogOutput) })
+
+	closeDone := make(chan error, 1)
+	startedAt := time.Now()
+	go func() { closeDone <- s.Close() }()
+	var closeErr error
+	select {
+	case closeErr = <-closeDone:
+	case <-time.After(closeGrace + killGrace + 2*time.Second):
+		holderCleaned = true
+		cleanupHolder()
+		select {
+		case <-closeDone:
+		case <-time.After(5 * time.Second):
+		}
+		t.Fatal("Close did not return after the bounded kill grace")
+	}
+	elapsed := time.Since(startedAt)
+	if closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
+	}
+	if elapsed < closeGrace+killGrace || elapsed > closeGrace+killGrace+2*time.Second {
+		t.Errorf("Close elapsed = %s, want between %s and %s", elapsed, closeGrace+killGrace, closeGrace+killGrace+2*time.Second)
+	}
+	if !strings.Contains(logOutput.String(), "abandoning plan output") {
+		t.Errorf("Close log = %q, want plan output abandonment", logOutput.String())
+	}
+	tempDir := filepath.Dir(strings.TrimPrefix(started.Argv[len(started.Argv)-1], "-out="))
+	if _, err := os.Stat(tempDir); !os.IsNotExist(err) {
+		t.Errorf("plan temp dir stat error = %v, want not exist", err)
+	}
+	if err := syscall.Kill(holderPID, 0); err != nil {
+		t.Errorf("detached pipe holder is not alive after Close: %v", err)
+	}
+	holderCleaned = true
+	cleanupHolder()
+}
+
 func TestPlanCancelTreatsAnyExitAfterRequestAsCanceled(t *testing.T) {
 	workspace := initializedWorkspace(t)
 	planScript(t, `trap 'echo interrupted >&2; exit 130' INT
@@ -600,34 +886,230 @@ while :; do /bin/sleep 1; done`, `echo '{"resource_changes":[]}'`)
 	}
 }
 
-func TestPlanCancelDoesNotConsumeSIGINTWhenProcessIsNotStarted(t *testing.T) {
-	run := &planRun{
-		id:          "12345678",
-		state:       "running",
-		subscribers: make(map[chan struct{}]struct{}),
-		done:        make(chan struct{}),
+func TestPlanCancelDuringPlanToShowHandoffReturnsFinishingConflict(t *testing.T) {
+	workspace := initializedWorkspace(t)
+	planScript(t, `echo $$ > "$PWD/plan-pid"
+/bin/sleep 60 </dev/null >/dev/null 2>&1 &
+echo $! > "$PWD/child-pid"
+for arg in "$@"; do
+  case "$arg" in -out=*) planfile=${arg#-out=}; : > "$planfile" ;; esac
+done`, `: > "$PWD/show-started"
+echo '{"resource_changes":[]}'`)
+	s := newPlanTestServerIn(t, workspace)
+	handoffReached := make(chan struct{})
+	releaseHandoff := make(chan struct{})
+	var reachedOnce sync.Once
+	var releaseOnce sync.Once
+	oldPlanShowHandoff := planShowHandoff
+	planShowHandoff = func() {
+		reachedOnce.Do(func() { close(handoffReached) })
+		<-releaseHandoff
 	}
-	s := newPlanTestServerIn(t, t.TempDir())
-	s.planMu.Lock()
-	s.plan = run
-	s.planMu.Unlock()
 	t.Cleanup(func() {
-		s.planMu.Lock()
-		if run.state == "running" {
-			run.state = "canceled"
-			close(run.done)
-		}
-		s.planMu.Unlock()
+		releaseOnce.Do(func() { close(releaseHandoff) })
+		planShowHandoff = oldPlanShowHandoff
 	})
+	startPlan(t, s)
+	select {
+	case <-handoffReached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("plan did not reach show handoff")
+	}
+	rawPID, err := os.ReadFile(filepath.Join(workspace, "plan-pid"))
+	if err != nil {
+		t.Fatalf("read plan PID: %v", err)
+	}
+	deadPID, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	if err != nil {
+		t.Fatalf("parse plan PID %q: %v", rawPID, err)
+	}
+	if err := syscall.Kill(deadPID, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("plan PID %d is not dead: %v", deadPID, err)
+	}
+	rawChildPID, err := os.ReadFile(filepath.Join(workspace, "child-pid"))
+	if err != nil {
+		t.Fatalf("read child PID: %v", err)
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(rawChildPID)))
+	if err != nil {
+		t.Fatalf("parse child PID %q: %v", rawChildPID, err)
+	}
+	childCleaned := false
+	t.Cleanup(func() {
+		if childCleaned {
+			return
+		}
+		if err := syscall.Kill(-deadPID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			t.Errorf("kill stale plan group %d: %v", deadPID, err)
+		}
+	})
+	if err := syscall.Kill(-deadPID, 0); err != nil {
+		t.Fatalf("stale plan group %d is not alive: %v", deadPID, err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "show-started")); !os.IsNotExist(err) {
+		t.Fatalf("show started before handoff release: %v", err)
+	}
 
 	rec := authenticatedRequest(t, s, http.MethodDelete, "/api/plan", nil)
-	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "process not started") {
-		t.Fatalf("DELETE = %d %q, want 500 process-not-started error", rec.Code, rec.Body.String())
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode DELETE response: %v", err)
+	}
+	if rec.Code != http.StatusConflict || len(body) != 1 || body["error"] != "plan is already finishing" {
+		t.Fatalf("DELETE = %d %q, want 409 finishing error", rec.Code, rec.Body.String())
 	}
 	s.planMu.Lock()
-	defer s.planMu.Unlock()
-	if run.intSent || run.cancelRequested {
-		t.Errorf("intSent/cancelRequested = %v/%v, want false/false after failed signal", run.intSent, run.cancelRequested)
+	if s.plan.intSent || s.plan.cancelRequested {
+		t.Errorf("intSent/cancelRequested = %v/%v, want false/false after failed signal", s.plan.intSent, s.plan.cancelRequested)
+	}
+	s.planMu.Unlock()
+	releaseOnce.Do(func() { close(releaseHandoff) })
+	_, summary := waitForSummary(t, s)
+	if summary.State != "succeeded" {
+		t.Errorf("state = %q, want succeeded", summary.State)
+	}
+	if err := syscall.Kill(-deadPID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("kill stale plan group %d: %v", deadPID, err)
+	}
+	childCleaned = true
+	waitForProcessExit(t, childPID)
+}
+
+func TestPlanCancelDuringInitialStartWaitsForPIDAndSendsSIGINT(t *testing.T) {
+	workspace := initializedWorkspace(t)
+	planScript(t, `trap 'exit 130' INT
+while :; do /bin/sleep 1; done`, `echo '{"resource_changes":[]}'`)
+	s := newPlanTestServerIn(t, workspace)
+	startReached := make(chan struct{})
+	releaseStart := make(chan struct{})
+	var reachedOnce sync.Once
+	var releaseOnce sync.Once
+	oldPlanStartHandoff := planStartHandoff
+	oldPlanCancelHandoff := planCancelHandoff
+	planStartHandoff = func() {
+		reachedOnce.Do(func() { close(startReached) })
+		<-releaseStart
+	}
+	cancelAtLock := make(chan bool, 1)
+	planCancelHandoff = func() {
+		acquired := s.planMu.TryLock()
+		if acquired {
+			s.planMu.Unlock()
+		}
+		cancelAtLock <- !acquired
+	}
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releaseStart) })
+		planStartHandoff = oldPlanStartHandoff
+		planCancelHandoff = oldPlanCancelHandoff
+	})
+
+	postDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		postDone <- authenticatedRequest(t, s, http.MethodPost, "/api/plan", nil)
+	}()
+	select {
+	case <-startReached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("plan did not reach initial start handoff")
+	}
+	deleteDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		deleteDone <- authenticatedRequest(t, s, http.MethodDelete, "/api/plan", nil)
+	}()
+	select {
+	case lockHeld := <-cancelAtLock:
+		if !lockHeld {
+			t.Fatal("DELETE reached an unlocked plan mutex before PID publication")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("DELETE did not reach the plan mutex")
+	}
+	select {
+	case rec := <-deleteDone:
+		t.Fatalf("DELETE returned before PID publication: %d %q", rec.Code, rec.Body.String())
+	case <-time.After(100 * time.Millisecond):
+	}
+	releaseOnce.Do(func() { close(releaseStart) })
+	post := <-postDone
+	if post.Code != http.StatusAccepted {
+		t.Fatalf("POST = %d %q, want 202", post.Code, post.Body.String())
+	}
+	cancel := <-deleteDone
+	if cancel.Code != http.StatusAccepted || !strings.Contains(cancel.Body.String(), `"signal":"SIGINT"`) {
+		t.Fatalf("DELETE = %d %q, want 202 SIGINT", cancel.Code, cancel.Body.String())
+	}
+	_, summary := waitForSummary(t, s)
+	if summary.State != "canceled" {
+		t.Errorf("state = %q, want canceled", summary.State)
+	}
+}
+
+func TestPlanCancelAfterTerminalStateReturnsNoRunConflict(t *testing.T) {
+	planScript(t, `for arg in "$@"; do
+  case "$arg" in -out=*) planfile=${arg#-out=}; : > "$planfile" ;; esac
+done`, `echo '{"resource_changes":[]}'`)
+	s := newPlanTestServerIn(t, initializedWorkspace(t))
+	startPlan(t, s)
+	waitForSummary(t, s)
+
+	rec := authenticatedRequest(t, s, http.MethodDelete, "/api/plan", nil)
+	if rec.Code != http.StatusConflict || rec.Body.String() != "{\"error\":\"no plan is running\"}\n" {
+		t.Fatalf("DELETE = %d %q, want 409 no plan running", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPlanCancelDuringPostShowFinishingReturnsConflict(t *testing.T) {
+	workspace := initializedWorkspace(t)
+	planScript(t, `for arg in "$@"; do
+  case "$arg" in -out=*) planfile=${arg#-out=}; : > "$planfile" ;; esac
+done`, `echo $$ > "$PWD/show-pid"
+echo '{"resource_changes":[]}'`)
+	s := newPlanTestServerIn(t, workspace)
+	showReaped := make(chan struct{})
+	releaseShow := make(chan struct{})
+	var reachedOnce sync.Once
+	var releaseOnce sync.Once
+	oldPlanShowReapedHandoff := planShowReapedHandoff
+	planShowReapedHandoff = func() {
+		reachedOnce.Do(func() { close(showReaped) })
+		<-releaseShow
+	}
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releaseShow) })
+		planShowReapedHandoff = oldPlanShowReapedHandoff
+	})
+	startPlan(t, s)
+	select {
+	case <-showReaped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("show did not reach post-reap handoff")
+	}
+	rawPID, err := os.ReadFile(filepath.Join(workspace, "show-pid"))
+	if err != nil {
+		t.Fatalf("read show PID: %v", err)
+	}
+	showPID, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	if err != nil {
+		t.Fatalf("parse show PID %q: %v", rawPID, err)
+	}
+	if err := syscall.Kill(showPID, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("show PID %d is not dead: %v", showPID, err)
+	}
+
+	rec := authenticatedRequest(t, s, http.MethodDelete, "/api/plan", nil)
+	if rec.Code != http.StatusConflict || rec.Body.String() != "{\"error\":\"plan is already finishing\"}\n" {
+		t.Fatalf("DELETE = %d %q, want 409 finishing", rec.Code, rec.Body.String())
+	}
+	s.planMu.Lock()
+	if s.plan.intSent || s.plan.cancelRequested {
+		t.Errorf("intSent/cancelRequested = %v/%v, want false/false", s.plan.intSent, s.plan.cancelRequested)
+	}
+	s.planMu.Unlock()
+	releaseOnce.Do(func() { close(releaseShow) })
+	_, summary := waitForSummary(t, s)
+	if summary.State != "succeeded" {
+		t.Errorf("state = %q, want succeeded", summary.State)
 	}
 }
 
@@ -986,10 +1468,12 @@ done`, `echo '{"resource_changes":[]}'`)
 
 func TestPlanEventsStreamsToMultipleSubscribers(t *testing.T) {
 	workspace := initializedWorkspace(t)
-	planScript(t, `echo first
+	planScript(t, `echo replay-1
+echo replay-2
 : > "$PWD/ready"
-/bin/sleep 0.2
-echo second
+while [ ! -f "$PWD/continue" ]; do /bin/sleep 0.01; done
+echo live-3
+echo live-4
 for arg in "$@"; do
   case "$arg" in -out=*) planfile=${arg#-out=}; : > "$planfile" ;; esac
 done`, `echo '{"resource_changes":[]}'`)
@@ -1007,12 +1491,147 @@ done`, `echo '{"resource_changes":[]}'`)
 			bodies[i] = rec.Body.String()
 		}(i)
 	}
-	wg.Wait()
-	for i, body := range bodies {
-		if !strings.Contains(body, `"text":"first"`) || !strings.Contains(body, `"text":"second"`) ||
-			!strings.Contains(body, "event: done") {
-			t.Errorf("subscriber %d body = %q, want both lines and done", i, body)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.planMu.Lock()
+		subscriberCount := len(s.plan.subscribers)
+		s.planMu.Unlock()
+		if subscriberCount == len(bodies) {
+			break
 		}
+		if time.Now().After(deadline) {
+			t.Fatalf("subscriber count = %d, want %d", subscriberCount, len(bodies))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "continue"), nil, 0o600); err != nil {
+		t.Fatalf("write continuation file: %v", err)
+	}
+	streamed := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(streamed)
+	}()
+	select {
+	case <-streamed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SSE subscribers did not finish")
+	}
+	for i, body := range bodies {
+		events := parseSSE(t, []byte(body))
+		if len(events) != 5 || events[len(events)-1].Name != "done" {
+			t.Fatalf("subscriber %d events = %+v, want four lines and done", i, events)
+		}
+		for j, event := range events[:4] {
+			if event.Name != "line" {
+				t.Fatalf("subscriber %d event %d = %+v, want line", i, j, event)
+			}
+			var line planLine
+			if err := json.Unmarshal(event.Data, &line); err != nil {
+				t.Fatalf("decode subscriber %d line %d: %v", i, j, err)
+			}
+			wantSeq := j + 1
+			wantText := []string{"replay-1", "replay-2", "live-3", "live-4"}[j]
+			if line.Seq != wantSeq || line.Text != wantText {
+				t.Errorf("subscriber %d line %d = %+v, want seq %d text %q", i, j, line, wantSeq, wantText)
+			}
+		}
+	}
+}
+
+func TestPlanEventsSlowSubscriberReceivesOneTruncationAndRetainedLines(t *testing.T) {
+	s := newPlanTestServerIn(t, t.TempDir())
+	run := &planRun{
+		id:          "12345678",
+		state:       "running",
+		exitCode:    -1,
+		lines:       make([]planLine, 0, maxPlanLines),
+		subscribers: make(map[*planSubscriber]struct{}),
+		done:        make(chan struct{}),
+	}
+	s.planMu.Lock()
+	s.plan = run
+	s.planMu.Unlock()
+	for seq := 1; seq <= maxPlanLines+1; seq++ {
+		s.appendPlanLine(run, "stdout", "line-"+strconv.Itoa(seq))
+	}
+
+	recorder := &blockingFlushRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		flushStarted:     make(chan struct{}),
+		allowFlush:       make(chan struct{}),
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/plan/events", nil)
+	req.AddCookie(&http.Cookie{Name: cookieName, Value: s.Token()})
+	streamDone := make(chan struct{})
+	go func() {
+		s.Handler().ServeHTTP(recorder, req)
+		close(streamDone)
+	}()
+	select {
+	case <-recorder.flushStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("subscriber did not block after initial truncation event")
+	}
+	for seq := maxPlanLines + 2; seq <= 2*maxPlanLines+2; seq++ {
+		s.appendPlanLine(run, "stdout", "line-"+strconv.Itoa(seq))
+	}
+	s.finishPlan(run, "succeeded", 0, "", &planSummary{Changes: []planChange{}})
+	close(recorder.allowFlush)
+	select {
+	case <-streamDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("slow subscriber did not finish")
+	}
+
+	events := parseSSE(t, recorder.Body.Bytes())
+	truncatedCount := 0
+	lineCount := 0
+	firstRetained := maxPlanLines + 3
+	for _, event := range events {
+		switch event.Name {
+		case "truncated":
+			truncatedCount++
+		case "line":
+			var line planLine
+			if err := json.Unmarshal(event.Data, &line); err != nil {
+				t.Fatalf("decode retained line: %v", err)
+			}
+			wantSeq := firstRetained + lineCount
+			if line.Seq != wantSeq || line.Text != "line-"+strconv.Itoa(wantSeq) {
+				t.Fatalf("line %d = %+v, want seq/text %d", lineCount, line, wantSeq)
+			}
+			lineCount++
+		}
+	}
+	if truncatedCount != 1 {
+		t.Errorf("truncated events = %d, want 1", truncatedCount)
+	}
+	if lineCount != maxPlanLines {
+		t.Errorf("line events = %d, want %d", lineCount, maxPlanLines)
+	}
+	if len(events) == 0 {
+		t.Fatal("events are empty, want terminal done event")
+	}
+	if events[len(events)-1].Name != "done" {
+		t.Fatalf("last event = %+v, want done", events[len(events)-1])
+	}
+}
+
+func TestNextPlanLineAfterCursorReturnsOnlyNewLine(t *testing.T) {
+	run := &planRun{
+		lines:     make([]planLine, maxPlanLines),
+		lineStart: 5,
+		truncated: true,
+		seq:       maxPlanLines + 5,
+	}
+	for i := range run.lines {
+		seq := i + 6
+		run.lines[(run.lineStart+i)%len(run.lines)] = planLine{Seq: seq}
+	}
+	line, ok := nextPlanLineLocked(run, run.seq-1)
+	if !ok || line.Seq != run.seq {
+		t.Fatalf("line after cursor = %+v/%v, want seq %d", line, ok, run.seq)
 	}
 }
 
@@ -1126,6 +1745,9 @@ done`, `echo '{"resource_changes":[]}'`)
 	firstDir := filepath.Dir(strings.TrimPrefix(first.Argv[len(first.Argv)-1], "-out="))
 	if info, err := os.Stat(firstDir); err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("first temp dir = %v/%v, want existing mode 0700", info, err)
+	}
+	if prefix := "rainforest-plan-" + strconv.Itoa(os.Getpid()) + "-"; !strings.HasPrefix(filepath.Base(firstDir), prefix) {
+		t.Errorf("first temp dir = %q, want prefix %q", firstDir, prefix)
 	}
 
 	second := startPlan(t, s)

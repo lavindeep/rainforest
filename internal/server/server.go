@@ -44,6 +44,7 @@ type Server struct {
 }
 
 func New(workspace, version string) (*Server, error) {
+	sweepPlanTempDirs()
 	dist, err := fs.Sub(web.Dist, "dist")
 	if err != nil {
 		return nil, err
