@@ -7,6 +7,7 @@
   --green: #46b26b;
   --red: #c56b6b;
   --amber: #c9a45c;
+  --orange: #d2853f;
 
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   font-size: 14px;
@@ -280,4 +281,253 @@ body {
   text-align: right;
   color: var(--muted);
   user-select: none;
+}
+
+.tabs {
+  display: flex;
+  gap: 14px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tab {
+  padding: 8px 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tab.current {
+  color: var(--text);
+  border-bottom-color: var(--text);
+}
+
+.plan {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.plan-run {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.plan-cmd {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.plan-button {
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.plan-button:hover:not(:disabled) {
+  border-color: var(--muted);
+}
+
+.plan-button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.plan-button.danger {
+  color: var(--red);
+}
+
+.plan-reason,
+.plan-error,
+.plan-notice,
+.plan-warn,
+.plan-calm,
+.plan-banner {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.plan-reason {
+  color: var(--red);
+}
+
+.plan-error {
+  padding: 6px 8px;
+  border-left: 2px solid var(--red);
+  color: var(--red);
+}
+
+.plan-notice {
+  color: var(--muted);
+}
+
+.plan-warn {
+  color: var(--amber);
+}
+
+.plan-calm {
+  color: var(--muted);
+}
+
+.plan-log {
+  max-height: 45vh;
+  min-height: 90px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.plan-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.plan-line.stderr {
+  color: var(--red);
+}
+
+.plan-line.system,
+.plan-line.dropped {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.plan-banner {
+  padding: 8px 10px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.plan-banner.ok {
+  border: 1px solid var(--green);
+  color: var(--green);
+}
+
+.plan-banner.bad {
+  border: 1px solid var(--red);
+  color: var(--red);
+}
+
+.plan-banner.off {
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.plan-chips {
+  display: flex;
+  gap: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.chip {
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.chip.add {
+  color: var(--green);
+}
+
+.chip.change {
+  color: var(--amber);
+}
+
+.chip.destroy {
+  color: var(--red);
+}
+
+.plan-changes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plan-change {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  border-left: 2px solid transparent;
+  min-width: 0;
+}
+
+.plan-change.destroy {
+  border-left-color: var(--red);
+}
+
+.plan-change.replace {
+  border-left-color: var(--orange);
+}
+
+.plan-address {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.plan-type {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.plan-badge {
+  flex: 0 0 auto;
+  width: 68px;
+  text-align: center;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
+.plan-badge.create {
+  color: var(--green);
+}
+
+.plan-badge.update {
+  color: var(--amber);
+}
+
+.plan-badge.destroy {
+  color: var(--red);
+}
+
+.plan-badge.replace {
+  color: var(--orange);
+  border: 1px solid var(--orange);
+  font-weight: 600;
+}
+
+.plan-badge.other {
+  color: var(--muted);
 }
