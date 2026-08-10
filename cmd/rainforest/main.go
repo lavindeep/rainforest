@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"syscall"
 
 	"github.com/lavindeep/rainforest/internal/server"
 )
@@ -59,9 +64,23 @@ func open(dir string) error {
 	if err != nil {
 		return err
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	closeErr := make(chan error, 1)
+	go func() {
+		<-ctx.Done()
+		closeErr <- s.Close()
+	}()
+
 	fmt.Printf("Rain Forest %s\nworkspace: %s\n%s\n", Version, workspace, s.URL())
 	if runtime.GOOS == "darwin" {
 		_ = exec.Command("open", s.URL()).Run()
 	}
-	return s.Serve()
+
+	serveErr := s.Serve()
+	stop()
+	if errors.Is(serveErr, net.ErrClosed) {
+		serveErr = nil
+	}
+	return errors.Join(serveErr, <-closeErr)
 }
