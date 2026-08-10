@@ -118,6 +118,11 @@ LLM-generated changes · native SwiftUI app · unmanaged-resource discovery.
   account management anywhere in the dashboard.
 - Temp plans/JSON are owner-only permissioned and deleted per retention rules.
 - Unknown/computed values are shown as unknown, never guessed.
+- Redaction stance: Terraform's human-rendered CLI output streams to the
+  dashboard verbatim — Terraform itself masks values marked sensitive, and the
+  stream is identical to what a terminal shows. The machine-readable plan/state
+  JSON (which contains real values) never leaves the Go process; the browser
+  only ever receives sanitized summaries.
 
 ## CLI
 

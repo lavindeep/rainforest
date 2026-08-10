@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -13,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/lavindeep/rainforest/internal/workspace"
 	"github.com/lavindeep/rainforest/web"
@@ -24,14 +27,24 @@ const (
 )
 
 type Server struct {
-	workspace string
-	version   string
-	token     string
-	listener  net.Listener
-	handler   http.Handler
+	workspace       string
+	version         string
+	token           string
+	listener        net.Listener
+	handler         http.Handler
+	planMu          sync.Mutex
+	plan            *planRun
+	planStarting    bool
+	planStarts      sync.WaitGroup
+	closed          bool
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
+	closeOnce       sync.Once
+	closeErr        error
 }
 
 func New(workspace, version string) (*Server, error) {
+	sweepPlanTempDirs()
 	dist, err := fs.Sub(web.Dist, "dist")
 	if err != nil {
 		return nil, err
@@ -48,11 +61,14 @@ func newWithFS(workspace, version string, dist fs.FS) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	s := &Server{
-		workspace: workspace,
-		version:   version,
-		token:     hex.EncodeToString(buf),
-		listener:  listener,
+		workspace:       workspace,
+		version:         version,
+		token:           hex.EncodeToString(buf),
+		listener:        listener,
+		lifecycleCtx:    lifecycleCtx,
+		lifecycleCancel: lifecycleCancel,
 	}
 
 	mux := http.NewServeMux()
@@ -60,6 +76,10 @@ func newWithFS(workspace, version string, dist fs.FS) (*Server, error) {
 	mux.HandleFunc("GET /api/preflight", s.preflight)
 	mux.HandleFunc("GET /api/workspace", s.scan)
 	mux.HandleFunc("GET /api/file", s.file)
+	mux.HandleFunc("POST /api/plan", s.startPlan)
+	mux.HandleFunc("GET /api/plan/events", s.planEvents)
+	mux.HandleFunc("DELETE /api/plan", s.cancelPlan)
+	mux.HandleFunc("GET /api/plan/summary", s.planSummary)
 	mux.Handle("/", staticHandler(dist))
 	s.handler = s.checkOrigin(s.requireToken(mux))
 	return s, nil
@@ -75,7 +95,21 @@ func (s *Server) Handler() http.Handler { return s.handler }
 
 func (s *Server) Serve() error { return http.Serve(s.listener, s.handler) }
 
-func (s *Server) Close() error { return s.listener.Close() }
+func (s *Server) Close() error {
+	s.closeOnce.Do(func() {
+		s.planMu.Lock()
+		s.closed = true
+		s.planMu.Unlock()
+		if s.lifecycleCancel != nil {
+			s.lifecycleCancel()
+		}
+		s.planStarts.Wait()
+		planErr := s.closePlan()
+		listenerErr := s.listener.Close()
+		s.closeErr = errors.Join(planErr, listenerErr)
+	})
+	return s.closeErr
+}
 
 func (s *Server) checkOrigin(next http.Handler) http.Handler {
 	_, port, _ := net.SplitHostPort(s.listener.Addr().String())
@@ -148,7 +182,11 @@ func (s *Server) preflight(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) terraformVersion(path string) string {
-	cmd := exec.Command(path, "version", "-json")
+	ctx := s.lifecycleCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd := exec.CommandContext(ctx, path, "version", "-json")
 	cmd.Dir = s.workspace
 	out, err := cmd.Output()
 	if err != nil {
