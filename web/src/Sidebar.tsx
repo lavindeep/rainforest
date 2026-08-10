@@ -62,7 +62,8 @@ function Navigator({ scan, selected, onSelect }: Omit<Props, 'health' | 'preflig
           <li key={file}>
             <button
               type="button"
-              className={file === selected ? 'node current' : 'node'}
+              className={file === selected ? 'node current truncate' : 'node truncate'}
+              title={file}
               onClick={() => onSelect(file, 0)}
             >
               {file}
@@ -74,7 +75,8 @@ function Navigator({ scan, selected, onSelect }: Omit<Props, 'health' | 'preflig
                   <li key={`${block.file}:${block.line}`}>
                     <button
                       type="button"
-                      className="node"
+                      className="node truncate"
+                      title={block.address}
                       onClick={() => onSelect(block.file, block.line)}
                     >
                       <span className={`kind kind-${block.kind}`}>{block.kind}</span>{' '}
@@ -109,9 +111,9 @@ export default function Sidebar({ health, preflight, scan, selected, onSelect }:
         {health ? (
           <>
             <span className="dot connected" />
-            <span>
+            <span className="status-text">
               v{health.version}
-              <span className="workspace" title={health.workspace}>
+              <span className="workspace truncate" title={health.workspace}>
                 {health.workspace}
               </span>
             </span>
