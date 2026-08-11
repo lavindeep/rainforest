@@ -70,6 +70,8 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
     () => Object.fromEntries(presetPositions(unionNodes(graphs), slots.current)),
     [graphs],
   )
+  const positionsRef = useRef(positions)
+  positionsRef.current = positions
 
   useEffect(() => {
     if (planSignal.revision === 0) return
@@ -146,7 +148,7 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
     cyRef.current = cy
     // ponytail: preset over cose — cose diverges on compound graphs in
     // cytoscape 3.34; revisit if free-form (non-containment) layouts are needed.
-    cy.layout({ name: 'preset', positions, animate: false, fit: false }).run()
+    cy.layout({ name: 'preset', positions: positionsRef.current, animate: false, fit: false }).run()
     fitComposed(cy)
     cy.on('mouseover', 'node', (event) => setHovered(nodesById.get(event.target.id()) ?? null))
     cy.on('mouseout', 'node', () => setHovered(null))
@@ -171,7 +173,7 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
       cy.destroy()
       if (cyRef.current === cy) cyRef.current = null
     }
-  }, [graph, positions])
+  }, [graph])
 
   const detail = selected ?? hovered
   const source = useMemo(
