@@ -29,8 +29,11 @@ direction.
   association, IGW, NAT, security groups + rules, EC2/ENI. Everything else renders
   as a generic node.
 - **Graph style:** minimal and clean, explicitly not Packet Tracer. Rounded,
-  typography-first cards show a small resource type and prominent name without
-  vendor icons. Containment uses soft nested tints; dependency edges are thin
+  typography-first cards show the resource type over its name, currently as one
+  two-line label at a single size; the two-tone treatment that plays the name up
+  against a smaller type waits for the planned iconic-tile redesign. No vendor
+  icons either way. Containment uses a neutral elevation ladder — each nesting
+  level sits a clear step above the one under it; dependency edges are thin
   and gently curved. Color is reserved for diff meaning, while extra detail is
   available on hover or selection.
 - **Layout:** persistent narrow navigator sidebar on the left; everything else in

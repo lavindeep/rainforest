@@ -9,6 +9,14 @@
   --amber: #c9a45c;
   --orange: #d2853f;
 
+  /* Topology elevation ladder over the --panel pane: each step is ~1.3:1 so a
+     card reads as sitting on its subnet, and the subnet on its VPC. */
+  --elev-1: #2c2f36;
+  --elev-2: #3d414b;
+  --elev-3: #4e5361;
+  --card-border: #69707e;
+  --edge: #5a616e;
+
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   font-size: 14px;
   color-scheme: dark;
@@ -126,6 +134,7 @@ body {
   padding: 12px;
   overflow-x: auto;
   scroll-snap-type: x mandatory;
+  scroll-padding-left: 12px;
 }
 
 .pane {
