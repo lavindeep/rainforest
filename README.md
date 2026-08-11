@@ -19,7 +19,7 @@ opens your browser.
 
 - Go — single binary with the frontend embedded
 - React + TypeScript + Vite
-- Cytoscape.js (graph) and CodeMirror 6 (editor) — planned
+- Native inline SVG (graph); CodeMirror 6 (editor) is planned
 
 ## Privacy
 

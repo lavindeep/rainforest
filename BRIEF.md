@@ -16,7 +16,7 @@ direction.
 - **Name:** Rain Forest. Binary/CLI: `rainforest`. Repo: `lavindeep/rainforest`.
 - **Backend:** Go — single binary with embedded frontend, official HashiCorp HCL
   libraries, stdlib HTTP/SSE/subprocess.
-- **Frontend:** React + TypeScript + Vite, Cytoscape.js for the graph,
+- **Frontend:** React + TypeScript + Vite, native inline SVG for the graph,
   **CodeMirror 6** for the editor (simple text editor, deliberately not an IDE —
   Monaco rejected).
 - **First slice:** plan review, read-only. Editing comes later.

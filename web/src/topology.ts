@@ -1,5 +1,3 @@
-import type { Core, StylesheetJson } from 'cytoscape'
-
 export type TopologyView = 'current' | 'proposed' | 'diff'
 
 export type TopologyPlanSignal = {
@@ -69,11 +67,6 @@ export type GraphResponse = {
   edges: GraphEdge[]
 }
 
-export type GraphElement = {
-  data: Record<string, string>
-  classes: string
-}
-
 type SourceBlock = {
   address: string
   file: string
@@ -88,34 +81,20 @@ export function clipText(value: string, limit: number) {
   return points.length > limit ? `${points.slice(0, limit - 1).join('')}…` : value
 }
 
-function className(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
-}
-
-// Plain text rendered by cytoscape's native canvas label — never HTML or a URI.
-export function nodeLabel(node: GraphNode) {
-  return `${clipText(node.type, LABEL_CHARS)}\n${clipText(node.name, LABEL_CHARS)}`
-}
-
 export const CARD_W = 172
 export const CARD_H = 58
-export const MIN_ZOOM = 0.05
-// Shared by the panel and the tests so both exercise the same zoom envelope.
-// maxZoom is deliberately past 1:1 — manual zoom-in is useful on a dense plan —
-// while fitComposed caps *fitting* at 1:1 so a two-card graph is never blown up.
+const MIN_ZOOM = 0.05
+// Manual zoom can pass 1:1, while automatic fitting never magnifies cards.
 export const ZOOM_LIMITS = { minZoom: MIN_ZOOM, maxZoom: 2.5 }
 const GRID_GAP = 36
 const GROUP_PAD = 28
 const MAX_PER_ROW = 3
 const FIT_MARGIN = 48
-const TEXT_MAX_W = 150
-// A realistic worst-case character in the label font stack measures ~6.4px at
-// 11px, so this many fit the text width on one line (measured: 146px of 150).
-export const LABEL_CHARS = Math.floor(TEXT_MAX_W / 6.4)
+export const LABEL_CHARS = 23
+const MAX_CONTAINMENT_DEPTH = 32
 
 // Missing, self-referential and cyclic parents are dropped: malformed data has
-// to land at the root rather than loop any walk up the chain, ours or
-// cytoscape's.
+// to land at the root rather than loop any walk up the chain.
 function parentMap(nodes: GraphNode[]) {
   const raw = new Map(nodes.map((node) => [node.id, node.parent ?? '']))
   const parents = new Map<string, string>()
@@ -123,9 +102,11 @@ function parentMap(nodes: GraphNode[]) {
     if (!parent || !raw.has(parent)) continue
     const seen = new Set([id])
     let cursor = parent
-    while (cursor !== '' && !seen.has(cursor)) {
+    let depth = 0
+    while (cursor !== '' && !seen.has(cursor) && depth < MAX_CONTAINMENT_DEPTH) {
       seen.add(cursor)
       cursor = raw.get(cursor) ?? ''
+      depth++
     }
     if (cursor === '') parents.set(id, parent)
   }
@@ -136,12 +117,14 @@ function parentMap(nodes: GraphNode[]) {
 // Both are frozen, so the center derived from them never changes.
 export type LayoutSlot = { x: number; y: number; w?: number; h?: number }
 
-type Rect = { x: number; y: number; w: number; h: number }
+export type Rect = { x: number; y: number; w: number; h: number }
+export type Point = { x: number; y: number }
+
+export type Viewport = { x: number; y: number; zoom: number; owned: boolean }
 
 // Fixed-size cards packed into a wrapping grid inside their compound. Every id
 // gets a center, including compounds: a node with children in one view can be a
-// bare card in another, and cytoscape recomputes real compounds from their
-// children anyway.
+// bare card in another.
 //
 // `slots` makes the layout monotonic while view responses trickle in: an id's
 // slot is recorded the first time it is placed and reused for the life of the
@@ -150,7 +133,7 @@ type Rect = { x: number; y: number; w: number; h: number }
 // ponytail: an anchored compound that gains children grows down and right and
 // can reach a neighbour anchored below it. Reserve a whole row per compound if
 // that ever shows up on a real plan.
-export function presetPositions(nodes: GraphNode[], slots = new Map<string, LayoutSlot>()) {
+function presetPositions(nodes: GraphNode[], slots = new Map<string, LayoutSlot>()) {
   const parents = parentMap(nodes)
   const children = new Map<string, GraphNode[]>()
   const roots: GraphNode[] = []
@@ -232,194 +215,143 @@ function hasAncestor(parents: Map<string, string>, id: string, ancestorId: strin
   return false
 }
 
-// Every view is laid out from this one list, so a node shared by Current,
-// Proposed and Diff sits in the same place in all of them. The union only
-// covers views already fetched, so it grows as responses land — presetPositions
-// absorbs that by appending rather than relaying out.
-export function unionNodes(graphs: Partial<Record<TopologyView, GraphResponse>>) {
-  const union = new Map<string, GraphNode>()
-  for (const view of ['current', 'proposed', 'diff'] as const) {
-    for (const node of graphs[view]?.nodes ?? []) {
-      if (!union.has(node.id)) union.set(node.id, node)
-    }
-  }
-  return [...union.values()]
-}
-
-export function graphElements(graph: GraphResponse): GraphElement[] {
+// Renderer-neutral graph data: preserve presentation state, but only expose
+// containment and dependencies that are valid for this node set.
+export function sceneForGraph(graph: GraphResponse): GraphResponse {
   const parents = parentMap(graph.nodes)
-  const nodes = graph.nodes.map((node) => {
-    const parent = parents.get(node.id)
-    return {
-      data: {
-        id: node.id,
-        address: node.address,
-        type: node.type,
-        name: node.name,
-        kind: node.kind,
-        label: nodeLabel(node),
-        ...(parent ? { parent } : {}),
-        ...(node.state ? { state: node.state } : {}),
-      },
-      classes: [`kind-${className(node.kind)}`, node.state ? `state-${node.state}` : '']
-        .filter(Boolean)
-        .join(' '),
-    }
-  })
-  // Containment already draws node-inside-ancestor; the matching dependency
-  // edge would only sweep across the compound box, so drop it.
-  const edges = graph.edges
-    .filter(
+  const ids = new Set(graph.nodes.map((node) => node.id))
+  return {
+    ...graph,
+    nodes: graph.nodes.map((node) => {
+      const parent = parents.get(node.id)
+      const { parent: _parent, ...rest } = node
+      return parent ? { ...rest, parent } : rest
+    }),
+    edges: graph.edges.filter(
       (edge) =>
+        ids.has(edge.source) &&
+        ids.has(edge.target) &&
         !hasAncestor(parents, edge.source, edge.target) &&
         !hasAncestor(parents, edge.target, edge.source),
-    )
-    .map((edge) => ({
-      data: {
-        id: edge.id,
-        source: edge.source,
-        target: edge.target,
-        kind: edge.kind,
-        ...(edge.state ? { state: edge.state } : {}),
-      },
-      classes: [`edge-${edge.kind}`, edge.state ? `state-${edge.state}` : '']
-        .filter(Boolean)
-        .join(' '),
-    }))
-  return [...nodes, ...edges]
+    ),
+  }
 }
 
-// Fit with a margin, never magnify past 1:1, then recenter: zooming back out
-// leaves the pan cytoscape computed for the magnified fit, which parks the
-// graph against the top-left corner of the pane.
-export function fitComposed(cy: Core) {
-  cy.fit(undefined, FIT_MARGIN)
-  if (cy.zoom() > 1) cy.zoom(1)
-  cy.center()
+export function nodesByContainmentDepth(nodes: GraphNode[]) {
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+  function depth(node: GraphNode) {
+    let value = 0
+    const seen = new Set([node.id])
+    for (let parent = node.parent; parent && !seen.has(parent); parent = byId.get(parent)?.parent) {
+      seen.add(parent)
+      value++
+    }
+    return value
+  }
+  return [...nodes].sort((first, second) => depth(first) - depth(second))
 }
 
-export const GRAPH_VARS = [
-  '--text',
-  '--muted',
-  '--green',
-  '--amber',
-  '--orange',
-  '--red',
-  '--elev-1',
-  '--elev-2',
-  '--elev-3',
-  '--card-border',
-  '--edge',
-] as const
+export function layoutTopology(
+  scene: GraphResponse,
+  slots = new Map<string, LayoutSlot>(),
+) {
+  presetPositions(scene.nodes, slots)
+  const nodes = new Map<string, Rect>()
+  const children = new Map<string, string[]>()
+  for (const node of scene.nodes) {
+    if (!node.parent) continue
+    children.set(node.parent, [...(children.get(node.parent) ?? []), node.id])
+  }
+  function rectangle(id: string): Rect | undefined {
+    const existing = nodes.get(id)
+    if (existing) return existing
+    const slot = slots.get(id)
+    if (!slot) return undefined
+    const descendants = (children.get(id) ?? []).flatMap((child) => {
+      const box = rectangle(child)
+      return box ? [box] : []
+    })
+    const box = descendants.length === 0
+      ? {
+          x: slot.x + (slot.w ?? CARD_W) / 2 - CARD_W / 2,
+          y: slot.y + (slot.h ?? CARD_H) / 2 - CARD_H / 2,
+          w: CARD_W,
+          h: CARD_H,
+        }
+      : {
+          x: Math.min(slot.x, ...descendants.map((child) => child.x - GROUP_PAD)),
+          y: Math.min(slot.y, ...descendants.map((child) => child.y - GROUP_PAD)),
+          w: Math.max(...descendants.map((child) => child.x + child.w), slot.x + CARD_W) -
+            Math.min(slot.x, ...descendants.map((child) => child.x - GROUP_PAD)) + GROUP_PAD,
+          h: Math.max(...descendants.map((child) => child.y + child.h), slot.y + CARD_H) -
+            Math.min(slot.y, ...descendants.map((child) => child.y - GROUP_PAD)) + GROUP_PAD,
+        }
+    nodes.set(id, box)
+    return box
+  }
+  for (const node of scene.nodes) {
+    rectangle(node.id)
+  }
+  const edges = scene.edges.flatMap((edge) => {
+    const source = nodes.get(edge.source)
+    const target = nodes.get(edge.target)
+    if (!source || !target) return []
+    return [{
+      ...edge,
+      points: [
+        { x: source.x + source.w / 2, y: source.y + source.h / 2 },
+        { x: target.x + target.w / 2, y: target.y + target.h / 2 },
+      ],
+    }]
+  })
+  return { nodes, edges }
+}
 
-export type Palette = Record<(typeof GRAPH_VARS)[number], string>
+export function fitViewport(
+  nodes: Map<string, Rect>,
+  size: { width: number; height: number },
+  current?: Viewport,
+): Viewport {
+  if (current?.owned) return current
+  if (nodes.size === 0) return { x: size.width / 2, y: size.height / 2, zoom: 1, owned: false }
 
-export function graphStyle(palette: Palette): StylesheetJson {
-  return [
-    {
-      selector: 'node',
-      style: {
-        width: CARD_W,
-        height: CARD_H,
-        shape: 'round-rectangle',
-        'background-color': palette['--elev-3'],
-        'background-opacity': 1,
-        'border-width': 1,
-        'border-color': palette['--card-border'],
-        label: 'data(label)',
-        color: palette['--text'],
-        // Double quotes, not single: cytoscape's font-family validator rejects
-        // single-quoted families and silently falls back to its own stack,
-        // which would break the character-width math behind LABEL_CHARS.
-        'font-family': 'system-ui, -apple-system, "Segoe UI", sans-serif',
-        'font-size': 11,
-        'text-wrap': 'wrap',
-        'text-max-width': `${TEXT_MAX_W}px`,
-        // Terraform names are one long underscored token, which whitespace
-        // wrapping cannot break out of the card.
-        'text-overflow-wrap': 'anywhere',
-        'line-height': 1.5,
-        'text-halign': 'center',
-        'text-valign': 'center',
-        'overlay-opacity': 0,
-      },
-    },
-    {
-      selector: ':parent',
-      style: {
-        padding: `${GROUP_PAD}px`,
-        'background-color': palette['--elev-1'],
-        'border-color': palette['--elev-2'],
-        color: palette['--muted'],
-        'font-size': 10,
-        'text-valign': 'top',
-        'text-margin-y': -6,
-      },
-    },
-    {
-      selector: ':parent:child',
-      style: {
-        'background-color': palette['--elev-2'],
-        'border-color': palette['--elev-3'],
-      },
-    },
-    {
-      selector: 'node:selected',
-      style: { 'border-width': 2, 'border-color': palette['--text'] },
-    },
-    {
-      selector: 'node.state-created',
-      style: { 'border-width': 2, 'border-color': palette['--green'] },
-    },
-    {
-      selector: 'node.state-changed',
-      style: { 'border-width': 2, 'border-color': palette['--amber'] },
-    },
-    {
-      selector: 'node.state-replaced',
-      style: { 'border-width': 2, 'border-color': palette['--orange'] },
-    },
-    {
-      selector: 'node.state-destroyed',
-      style: {
-        'border-width': 2,
-        'border-color': palette['--red'],
-        'border-style': 'dashed',
-      },
-    },
-    {
-      // Fading the card reads as "going away"; fading a compound would drag its
-      // whole subtree — tint, children and all — down with it, so the dashed
-      // red border carries the meaning there instead.
-      selector: 'node.state-destroyed:childless',
-      style: { opacity: 0.72 },
-    },
-    {
-      selector: 'edge',
-      style: {
-        width: 1,
-        'curve-style': 'bezier',
-        'line-color': palette['--edge'],
-        'target-arrow-color': palette['--edge'],
-        'target-arrow-shape': 'triangle',
-        'arrow-scale': 0.65,
-        'overlay-opacity': 0,
-      },
-    },
-    {
-      selector: 'edge.state-opened',
-      style: { 'line-color': palette['--green'], 'target-arrow-color': palette['--green'] },
-    },
-    {
-      selector: 'edge.state-closed',
-      style: {
-        'line-color': palette['--red'],
-        'target-arrow-color': palette['--red'],
-        'line-style': 'dashed',
-        opacity: 0.72,
-      },
-    },
-  ]
+  const boxes = [...nodes.values()]
+  const left = Math.min(...boxes.map((box) => box.x))
+  const top = Math.min(...boxes.map((box) => box.y))
+  const right = Math.max(...boxes.map((box) => box.x + box.w))
+  const bottom = Math.max(...boxes.map((box) => box.y + box.h))
+  const zoom = Math.max(
+    MIN_ZOOM,
+    Math.min(1, (size.width - FIT_MARGIN * 2) / (right - left), (size.height - FIT_MARGIN * 2) / (bottom - top)),
+  )
+  let x = (size.width - (left + right) * zoom) / 2
+  let y = (size.height - (top + bottom) * zoom) / 2
+
+  const visible = boxes.some(
+    (box) =>
+      box.x * zoom + x + box.w * zoom > 0 &&
+      box.x * zoom + x < size.width &&
+      box.y * zoom + y + box.h * zoom > 0 &&
+      box.y * zoom + y < size.height,
+  )
+  if (!visible) {
+    const node = boxes.reduce((smallest, box) => box.w * box.h < smallest.w * smallest.h ? box : smallest)
+    x = size.width / 2 - (node.x + node.w / 2) * zoom
+    y = size.height / 2 - (node.y + node.h / 2) * zoom
+  }
+  return { x, y, zoom, owned: false }
+}
+
+export function zoomViewport(viewport: Viewport, zoom: number, pointer: Point): Viewport {
+  const nextZoom = Math.max(ZOOM_LIMITS.minZoom, Math.min(ZOOM_LIMITS.maxZoom, zoom))
+  const worldX = (pointer.x - viewport.x) / viewport.zoom
+  const worldY = (pointer.y - viewport.y) / viewport.zoom
+  return {
+    x: pointer.x - worldX * nextZoom,
+    y: pointer.y - worldY * nextZoom,
+    zoom: nextZoom,
+    owned: true,
+  }
 }
 
 export function sourceForAddress(
