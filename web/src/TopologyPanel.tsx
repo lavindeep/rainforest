@@ -284,69 +284,69 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
                 ? error || `No ${view} topology available`
                 : ''}
         </div>
-      </div>
 
-      {(detail || selectedEdge) && (
-        <aside className="topology-detail" aria-live="polite">
-          <div className="topology-detail-summary">
-            <div className="topology-detail-text">
-              {detail ? (
-                <>
-                  <span className="topology-detail-type truncate" title={detail.type}>
-                    {detail.type}
-                  </span>
-                  <strong className="truncate" title={nodeLabel(detail)}>
-                    {nodeLabel(detail)}
-                  </strong>
-                  <code className="truncate" title={detail.address}>
-                    {detail.address}
-                  </code>
-                </>
-              ) : selectedEdge ? (
-                <>
-                  <span className="topology-detail-type">Dependency</span>
-                  <strong className="truncate" title={edgeLabel(selectedEdge.id)}>
-                    {edgeLabel(selectedEdge.id)}
-                  </strong>
-                  <code
-                    className="truncate"
-                    title={`${selectedEdgeSource?.address ?? selectedEdge.source} → ${selectedEdgeTarget?.address ?? selectedEdge.target}`}
-                  >
-                    {selectedEdgeSource ? nodeLabel(selectedEdgeSource) : selectedEdge.source}
-                    {' → '}
-                    {selectedEdgeTarget ? nodeLabel(selectedEdgeTarget) : selectedEdge.target}
-                  </code>
-                </>
+        {(detail || selectedEdge) && (
+          <aside className="topology-detail" aria-live="polite">
+            <div className="topology-detail-summary">
+              <div className="topology-detail-text">
+                {detail ? (
+                  <>
+                    <span className="topology-detail-type truncate" title={detail.type}>
+                      {detail.type}
+                    </span>
+                    <strong className="truncate" title={nodeLabel(detail)}>
+                      {nodeLabel(detail)}
+                    </strong>
+                    <code className="truncate" title={detail.address}>
+                      {detail.address}
+                    </code>
+                  </>
+                ) : selectedEdge ? (
+                  <>
+                    <span className="topology-detail-type">Dependency</span>
+                    <strong className="truncate" title={edgeLabel(selectedEdge.id)}>
+                      {edgeLabel(selectedEdge.id)}
+                    </strong>
+                    <code
+                      className="truncate"
+                      title={`${selectedEdgeSource?.address ?? selectedEdge.source} → ${selectedEdgeTarget?.address ?? selectedEdge.target}`}
+                    >
+                      {selectedEdgeSource ? nodeLabel(selectedEdgeSource) : selectedEdge.source}
+                      {' → '}
+                      {selectedEdgeTarget ? nodeLabel(selectedEdgeTarget) : selectedEdge.target}
+                    </code>
+                  </>
+                ) : null}
+              </div>
+              {detail && source ? (
+                <button type="button" onClick={() => onSelectSource(source.path, source.line)}>
+                  Open source
+                </button>
+              ) : detail ? (
+                <span className="topology-source-unavailable">Source unavailable</span>
               ) : null}
             </div>
-            {detail && source ? (
-              <button type="button" onClick={() => onSelectSource(source.path, source.line)}>
-                Open source
-              </button>
-            ) : detail ? (
-              <span className="topology-source-unavailable">Source unavailable</span>
-            ) : null}
-          </div>
-          {selected && annotationTarget && (
-            <AnnotationEditor
-              kind={annotationTarget.kind}
-              defaultLabel={selectedNode?.name ?? 'depends on'}
-              annotation={annotationFor(annotations.document, annotationTarget)}
-              loaded={annotations.loaded}
-              dirty={annotations.dirty}
-              saving={annotations.savingRequest !== null}
-              saved={annotations.saved}
-              error={annotations.error}
-              onChange={(annotation) => dispatchAnnotations({
-                type: 'edit',
-                target: annotationTarget,
-                annotation,
-              })}
-              onSave={() => void saveAnnotations()}
-            />
-          )}
-        </aside>
-      )}
+            {selected && annotationTarget && (
+              <AnnotationEditor
+                kind={annotationTarget.kind}
+                defaultLabel={selectedNode?.name ?? 'depends on'}
+                annotation={annotationFor(annotations.document, annotationTarget)}
+                loaded={annotations.loaded}
+                dirty={annotations.dirty}
+                saving={annotations.savingRequest !== null}
+                saved={annotations.saved}
+                error={annotations.error}
+                onChange={(annotation) => dispatchAnnotations({
+                  type: 'edit',
+                  target: annotationTarget,
+                  annotation,
+                })}
+                onSave={() => void saveAnnotations()}
+              />
+            )}
+          </aside>
+        )}
+      </div>
     </div>
   )
 }

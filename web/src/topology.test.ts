@@ -333,6 +333,84 @@ function boxesOverlap(
     first.y < second.y + second.h && first.y + first.h > second.y
 }
 
+function segmentCrossesBox(
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+  box: { x: number; y: number; w: number; h: number },
+) {
+  if (start.x === end.x) {
+    return start.x > box.x && start.x < box.x + box.w &&
+      Math.max(start.y, end.y) > box.y && Math.min(start.y, end.y) < box.y + box.h
+  }
+  return start.y > box.y && start.y < box.y + box.h &&
+    Math.max(start.x, end.x) > box.x && Math.min(start.x, end.x) < box.x + box.w
+}
+
+function denseCompoundGraph(nodeCount: 45 | 80, edgeCount: 170 | 310) {
+  const groups = nodeCount === 45 ? 5 : 10
+  const childrenPerGroup = nodeCount === 45 ? 8 : 7
+  const nodes: GraphNode[] = []
+  for (let group = 0; group < groups; group++) {
+    nodes.push(node(`group-${group}`, 'subnet'))
+    for (let child = 0; child < childrenPerGroup; child++) {
+      nodes.push(node(`child-${group}-${child}`, 'instance', `group-${group}`))
+    }
+  }
+  const edges = Array.from({ length: edgeCount }, (_, index) => {
+    const sourceGroup = index % groups
+    const sourceChild = Math.floor(index / groups) % childrenPerGroup
+    const targetGroup = (
+      sourceGroup + 1 + Math.floor(index / (groups * childrenPerGroup)) % (groups - 1)
+    ) % groups
+    const targetChild = (index * 3 + 1) % childrenPerGroup
+    return {
+      id: `dependency-${index}`,
+      source: `child-${sourceGroup}-${sourceChild}`,
+      target: `child-${targetGroup}-${targetChild}`,
+      kind: 'dependency' as const,
+    }
+  })
+  return sceneForGraph({ view: 'current', runId: 'dense', nodes, edges })
+}
+
+function assertEdgeClearsCards(
+  scene: GraphResponse,
+  layout: ReturnType<typeof layoutTopology>,
+  edgeId: string,
+) {
+  const conflicts = edgeCardConflicts(scene, layout, edgeId)
+  assert.equal(conflicts.label, false, `${edgeId} label overlaps a card`)
+  assert.equal(conflicts.route, false, `${edgeId} route crosses a card`)
+}
+
+function edgeCardConflicts(
+  scene: GraphResponse,
+  layout: ReturnType<typeof layoutTopology>,
+  edgeId: string,
+) {
+  const edge = layout.edges.find((candidate) => candidate.id === edgeId) ??
+    assert.fail(`missing ${edgeId}`)
+  const compounds = new Set(scene.nodes.flatMap((item) => item.parent ? [item.parent] : []))
+  const leafBoxes = [...layout.nodes].filter(([id]) => !compounds.has(id))
+  const labelPoint = edgeLabelPoint(edge.points)
+  const labelBox = {
+    x: labelPoint.x - EDGE_LABEL_WIDTH / 2,
+    y: labelPoint.y - EDGE_LABEL_HEIGHT / 2,
+    w: EDGE_LABEL_WIDTH,
+    h: EDGE_LABEL_HEIGHT,
+  }
+  let route = false
+  let label = false
+  for (const [id, box] of leafBoxes) {
+    label ||= boxesOverlap(labelBox, box)
+    if (id === edge.source || id === edge.target) continue
+    for (let index = 1; index < edge.points.length; index++) {
+      route ||= segmentCrossesBox(edge.points[index - 1], edge.points[index], box)
+    }
+  }
+  return { route, label }
+}
+
 test('edge routes and labels clear adjacent and intervening cards', () => {
   for (const [name, target] of [['adjacent', 'b'], ['skipped', 'c']] as const) {
     const nodes = [node('a', 'instance'), node('b', 'instance'), node('c', 'instance')]
@@ -426,6 +504,52 @@ test('fitViewport keeps repeated edge lanes and labels inside the canvas', () =>
     assert.ok(top >= 0 && bottom <= size.height, `${edge.id} label is clipped vertically`)
   }
 })
+
+test('dense dependency routes stay inside compact panes at minimum zoom', () => {
+  for (const [nodeCount, edgeCount] of [[45, 170], [80, 310]] as const) {
+    const scene = denseCompoundGraph(nodeCount, edgeCount)
+    const layout = layoutTopology(scene)
+    const size = { width: 506, height: 696 }
+    const viewport = fitViewport(layout.nodes, size, undefined, layout.edges)
+
+    assert.equal(scene.nodes.length, nodeCount)
+    assert.equal(scene.edges.length, edgeCount)
+    assert.ok(viewport.zoom >= ZOOM_LIMITS.minZoom)
+    let routeCrossings = 0
+    let labelOverlaps = 0
+    for (const edge of layout.edges) {
+      const conflicts = edgeCardConflicts(scene, layout, edge.id)
+      routeCrossings += Number(conflicts.route)
+      labelOverlaps += Number(conflicts.label)
+      const label = edgeLabelPoint(edge.points)
+      const probes = [
+        ...edge.points,
+        { x: label.x - EDGE_LABEL_WIDTH / 2, y: label.y - EDGE_LABEL_HEIGHT / 2 },
+        { x: label.x + EDGE_LABEL_WIDTH / 2, y: label.y + EDGE_LABEL_HEIGHT / 2 },
+      ]
+      for (const point of probes) {
+        const x = point.x * viewport.zoom + viewport.x
+        const y = point.y * viewport.zoom + viewport.y
+        assert.ok(x >= 0 && x <= size.width, `${nodeCount}/${edgeCount} ${edge.id} clips x=${x}`)
+        assert.ok(y >= 0 && y <= size.height, `${nodeCount}/${edgeCount} ${edge.id} clips y=${y}`)
+      }
+    }
+    assert.ok(routeCrossings <= edgeCount * 0.4, `${routeCrossings} routes cross cards`)
+    assert.ok(labelOverlaps <= edgeCount * 0.15, `${labelOverlaps} labels overlap cards`)
+  }
+})
+
+for (const edgeId of [
+  'dependency-1',
+  'dependency-8',
+  'dependency-12',
+  'dependency-21',
+] as const) {
+  test(`bounded fallback searches for a clear lane for ${edgeId}`, () => {
+    const scene = denseCompoundGraph(45, 170)
+    assertEdgeClearsCards(scene, layoutTopology(scene), edgeId)
+  })
+}
 
 test('truncation counts code points so emoji are never split', () => {
   const name = clipText(`bastion_${'🚀'.repeat(20)}`, LABEL_CHARS)
@@ -940,6 +1064,47 @@ test('edge markers keep a fixed size and selected diff nodes keep their state co
     /\.topology-node\.selected > \.topology-node-surface,[\s\S]*?\{([^}]*)\}/g,
   )].at(-1)?.[1] ?? assert.fail('missing selected node style')
   assert.doesNotMatch(selected, /stroke\s*:/)
+})
+
+test('only the edge pointer target keeps an approximately 24px hit width while zooming', () => {
+  const svg = readFileSync(new URL('./SvgTopology.tsx', import.meta.url), 'utf8')
+  assert.match(
+    svg,
+    /className="topology-edge-hit"[^>]*vectorEffect="non-scaling-stroke"/,
+  )
+  assert.equal(svg.match(/vectorEffect="non-scaling-stroke"/g)?.length, 1)
+
+  const css = readFileSync(new URL('./topology.css', import.meta.url), 'utf8')
+  const hit = css.match(/\.topology-edge-hit\s*{([^}]*)}/s)?.[1] ?? assert.fail('missing edge hit style')
+  assert.match(hit, /stroke-width:\s*24(?:px)?\s*;/)
+})
+
+test('annotation detail and textarea are bounded inside compact topology panes', () => {
+  const css = readFileSync(new URL('./topology.css', import.meta.url), 'utf8')
+  const detail = css.match(/\.topology-detail\s*{([^}]*)}/s)?.[1] ?? assert.fail('missing detail style')
+  assert.match(detail, /max-height:\s*calc\(100%\s*-\s*24px\)\s*;/)
+  assert.match(detail, /overflow-y:\s*auto\s*;/)
+
+  const textarea = [...css.matchAll(/\.topology-annotation textarea\s*{([^}]*)}/gs)].at(-1)?.[1] ??
+    assert.fail('missing annotation textarea style')
+  assert.match(textarea, /max-height:\s*120px\s*;/)
+
+  const panel = readFileSync(new URL('./TopologyPanel.tsx', import.meta.url), 'utf8')
+  const stageStart = panel.indexOf('<div className="topology-stage">')
+  const detailStart = panel.indexOf('<aside className="topology-detail"')
+  assert.ok(stageStart >= 0 && detailStart >= 0)
+  const tags = /<div\b|<\/div>/g
+  tags.lastIndex = stageStart
+  let depth = 0
+  let stageEnd = -1
+  for (let match = tags.exec(panel); match; match = tags.exec(panel)) {
+    depth += match[0] === '</div>' ? -1 : 1
+    if (depth === 0) {
+      stageEnd = match.index
+      break
+    }
+  }
+  assert.ok(detailStart > stageStart && detailStart < stageEnd, 'detail must be inside topology-stage')
 })
 
 test('annotation editor does not use UTF-16 maxLength limits', () => {

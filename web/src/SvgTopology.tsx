@@ -275,7 +275,11 @@ export default function SvgTopology({
               onClick={() => onSelect({ kind: 'edge', id: edge.id })}
               onKeyDown={(event) => selectWithKeyboard(event, { kind: 'edge', id: edge.id })}
             >
-              <path className="topology-edge-hit" d={pathFor(edge.points)} />
+              <path
+                className="topology-edge-hit"
+                d={pathFor(edge.points)}
+                vectorEffect="non-scaling-stroke"
+              />
               <path
                 className={`topology-edge${stateClass(edge.state)}`}
                 d={pathFor(edge.points)}

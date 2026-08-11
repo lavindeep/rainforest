@@ -138,6 +138,7 @@ export const LABEL_CHARS = 18
 export const EDGE_LABEL_WIDTH = 62
 export const EDGE_LABEL_HEIGHT = 16
 const EDGE_GUTTER = 16
+const MAX_FALLBACK_LANES_PER_SIDE = 4
 const MAX_CONTAINMENT_DEPTH = 32
 
 // Missing, self-referential and cyclic parents are dropped: malformed data has
@@ -324,7 +325,7 @@ function orthogonalPoints(
   source: Rect,
   target: Rect,
   leafBoxes: Rect[],
-  edgeIndex: number,
+  fallbackLane: { next: number },
 ): Point[] {
   const from = center(source)
   const to = center(target)
@@ -332,46 +333,65 @@ function orthogonalPoints(
   const top = Math.min(...leafBoxes.map((box) => box.y))
   const right = Math.max(...leafBoxes.map((box) => box.x + box.w))
   const bottom = Math.max(...leafBoxes.map((box) => box.y + box.h))
-  const laneOffset = EDGE_GUTTER + edgeIndex * (EDGE_LABEL_HEIGHT + EDGE_GUTTER)
-  const topLane = top - EDGE_LABEL_HEIGHT / 2 - laneOffset
-  const bottomLane = bottom + EDGE_LABEL_HEIGHT / 2 + laneOffset
-  const leftLane = left - EDGE_LABEL_WIDTH / 2 - laneOffset
-  const rightLane = right + EDGE_LABEL_WIDTH / 2 + laneOffset
-  const candidates = [
+  const direct = [
     horizontalRoute(source, target),
     verticalRoute(source, target),
-    [
-      { x: from.x, y: source.y },
-      { x: from.x, y: topLane },
-      { x: to.x, y: topLane },
-      { x: to.x, y: target.y },
-    ],
-    [
-      { x: from.x, y: source.y + source.h },
-      { x: from.x, y: bottomLane },
-      { x: to.x, y: bottomLane },
-      { x: to.x, y: target.y + target.h },
-    ],
-    [
-      { x: source.x, y: from.y },
-      { x: leftLane, y: from.y },
-      { x: leftLane, y: to.y },
-      { x: target.x, y: to.y },
-    ],
-    [
-      { x: source.x + source.w, y: from.y },
-      { x: rightLane, y: from.y },
-      { x: rightLane, y: to.y },
-      { x: target.x + target.w, y: to.y },
-    ],
   ]
   if (Math.abs(from.y - to.y) > Math.abs(from.x - to.x)) {
-    const horizontal = candidates[0]
-    candidates[0] = candidates[1]
-    candidates[1] = horizontal
+    direct.reverse()
   }
   const obstacles = leafBoxes.filter((box) => box !== source && box !== target)
-  return candidates.find((points) => routeIsClear(points, obstacles, leafBoxes)) ?? candidates[2]
+  const clear = direct.find((points) => routeIsClear(points, obstacles, leafBoxes))
+  if (clear) return clear
+
+  const allocation = fallbackLane.next++
+  function fallbackFor(side: number, lane: number): Point[] {
+    const laneOffset = EDGE_GUTTER + lane * (EDGE_LABEL_HEIGHT + EDGE_GUTTER)
+    const topLane = top - EDGE_LABEL_HEIGHT / 2 - laneOffset
+    const bottomLane = bottom + EDGE_LABEL_HEIGHT / 2 + laneOffset
+    const leftLane = left - EDGE_LABEL_WIDTH / 2 - laneOffset
+    const rightLane = right + EDGE_LABEL_WIDTH / 2 + laneOffset
+    return [
+      [
+        { x: from.x, y: source.y },
+        { x: from.x, y: topLane },
+        { x: to.x, y: topLane },
+        { x: to.x, y: target.y },
+      ],
+      [
+        { x: from.x, y: source.y + source.h },
+        { x: from.x, y: bottomLane },
+        { x: to.x, y: bottomLane },
+        { x: to.x, y: target.y + target.h },
+      ],
+      [
+        { x: source.x, y: from.y },
+        { x: leftLane, y: from.y },
+        { x: leftLane, y: to.y },
+        { x: target.x, y: to.y },
+      ],
+      [
+        { x: source.x + source.w, y: from.y },
+        { x: rightLane, y: from.y },
+        { x: rightLane, y: to.y },
+        { x: target.x + target.w, y: to.y },
+      ],
+    ][side]
+  }
+
+  const preferredSide = allocation % 4
+  for (let lane = 0; lane < MAX_FALLBACK_LANES_PER_SIDE; lane++) {
+    for (let sideOffset = 0; sideOffset < 4; sideOffset++) {
+      const candidate = fallbackFor((preferredSide + sideOffset) % 4, lane)
+      if (routeIsClear(candidate, obstacles, leafBoxes)) return candidate
+    }
+  }
+
+  // Dense graphs may have no clear outer route; overlap a capped lane instead of growing forever.
+  return fallbackFor(
+    preferredSide,
+    Math.floor(allocation / 4) % MAX_FALLBACK_LANES_PER_SIDE,
+  )
 }
 
 export function edgeLabelPoint(points: Point[]): Point {
@@ -472,13 +492,14 @@ export function layoutTopology(
   const leafBoxes = [...nodes]
     .filter(([id]) => !children.has(id))
     .map(([, box]) => box)
-  const edges = scene.edges.flatMap((edge, edgeIndex) => {
+  const fallbackLane = { next: 0 }
+  const edges = scene.edges.flatMap((edge) => {
     const source = nodes.get(edge.source)
     const target = nodes.get(edge.target)
     if (!source || !target) return []
     return [{
       ...edge,
-      points: orthogonalPoints(source, target, leafBoxes, edgeIndex),
+      points: orthogonalPoints(source, target, leafBoxes, fallbackLane),
     }]
   })
   return { nodes, edges }
