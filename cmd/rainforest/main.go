@@ -24,11 +24,11 @@ func main() {
 	}
 	switch args[0] {
 	case "open":
-		dir := "."
-		if len(args) > 1 {
-			dir = args[1]
+		dir, noBrowser, err := parseOpenArgs(args[1:])
+		if err != nil {
+			usage()
 		}
-		if err := open(dir); err != nil {
+		if err := open(dir, noBrowser); err != nil {
 			fmt.Fprintln(os.Stderr, "rainforest:", err)
 			os.Exit(1)
 		}
@@ -41,13 +41,35 @@ func main() {
 
 func usage() {
 	fmt.Fprint(os.Stderr, `usage:
-  rainforest open [dir]   start the local dashboard
-  rainforest version      print the version
+  rainforest open [--no-browser] [dir]   start the local dashboard
+  rainforest version                      print the version
 `)
 	os.Exit(1)
 }
 
-func open(dir string) error {
+func parseOpenArgs(args []string) (string, bool, error) {
+	dir := "."
+	noBrowser := false
+	options := true
+	dirSet := false
+	for _, arg := range args {
+		if options && arg == "--" {
+			options = false
+		} else if options && arg == "--no-browser" {
+			noBrowser = true
+		} else if options && len(arg) > 0 && arg[0] == '-' {
+			return "", false, fmt.Errorf("unknown flag: %s", arg)
+		} else if dirSet {
+			return "", false, fmt.Errorf("too many directories")
+		} else {
+			dir = arg
+			dirSet = true
+		}
+	}
+	return dir, noBrowser, nil
+}
+
+func open(dir string, noBrowser bool) error {
 	workspace, err := filepath.Abs(dir)
 	if err != nil {
 		return err
@@ -73,7 +95,7 @@ func open(dir string) error {
 	}()
 
 	fmt.Printf("Rain Forest %s\nworkspace: %s\n%s\n", Version, workspace, s.URL())
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == "darwin" && !noBrowser {
 		_ = exec.Command("open", s.URL()).Run()
 	}
 
