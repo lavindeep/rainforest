@@ -770,8 +770,8 @@ func edgeMap(edges []graphEdge) map[string]graphEdge {
 }
 
 func cloneGraph(graph graphResponse) graphResponse {
-	graph.Nodes = append([]graphNode(nil), graph.Nodes...)
-	graph.Edges = append([]graphEdge(nil), graph.Edges...)
+	graph.Nodes = append([]graphNode{}, graph.Nodes...)
+	graph.Edges = append([]graphEdge{}, graph.Edges...)
 	return graph
 }
 

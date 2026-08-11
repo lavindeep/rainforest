@@ -16,7 +16,7 @@ direction.
 - **Name:** Rain Forest. Binary/CLI: `rainforest`. Repo: `lavindeep/rainforest`.
 - **Backend:** Go — single binary with embedded frontend, official HashiCorp HCL
   libraries, stdlib HTTP/SSE/subprocess.
-- **Frontend:** React + TypeScript + Vite, Cytoscape.js for the graph,
+- **Frontend:** React + TypeScript + Vite, native inline SVG for the graph,
   **CodeMirror 6** for the editor (simple text editor, deliberately not an IDE —
   Monaco rejected).
 - **First slice:** plan review, read-only. Editing comes later.
@@ -28,14 +28,14 @@ direction.
 - **AWS semantic scope:** core networking only — VPC, subnet, route table/route/
   association, IGW, NAT, security groups + rules, EC2/ENI. Everything else renders
   as a generic node.
-- **Graph style:** minimal and clean, explicitly not Packet Tracer. Rounded,
-  typography-first cards show the resource type over its name, currently as one
-  two-line label at a single size; the two-tone treatment that plays the name up
-  against a smaller type waits for the planned iconic-tile redesign. No vendor
-  icons either way. Containment uses a neutral elevation ladder — each nesting
-  level sits a clear step above the one under it; dependency edges are thin
-  and gently curved. Color is reserved for diff meaning, while extra detail is
-  available on hover or selection.
+- **Graph style:** minimal and clean, explicitly not Packet Tracer. Rounded
+  cards pair resource type/name text with a small original geometric glyph on
+  a flat color tile. The glyphs use Rain Forest's own palette and generic
+  infrastructure concepts only — never vendor icons or near-copies.
+  Containment uses crisp high-contrast surfaces; dependency edges are thin,
+  orthogonal, and labeled `depends on` until the user supplies a presentation
+  label. Diff colors remain distinct from service-tile colors, while extra
+  detail is available on hover or selection.
 - **Layout:** persistent narrow navigator sidebar on the left; everything else in
   a horizontally scrolling pane strip (see Layout below).
 - **CLI philosophy:** the CLI stays minimal — initial setup, opening the dashboard,
@@ -73,15 +73,16 @@ unless `--no-browser` is supplied.
   Terraform's own error clearly.
 - Topology graph from `terraform show -json` (state) and a saved plan:
   **Current / Proposed / Diff** views. Every node — including unsupported
-  resource types — gets a simple label: resource type + name, so generic
-  nodes are still "known" for what they are. Generic dependency edges for
-  all resources; AWS core-networking resources additionally get containment
-  grouping when exactly one parent is proven: VPC ⊃ subnet/route table/IGW/
+  resource types — gets an original generic glyph plus resource type + name,
+  so generic nodes are still "known" for what they are. Labeled generic
+  dependency edges for all resources; AWS core-networking resources additionally
+  get containment grouping when exactly one parent is proven: VPC ⊃ subnet/route table/IGW/
   security group and subnet ⊃ instance/ENI/NAT. Proposed is built from the
   saved plan; Diff is the union of prior and proposed resources, marking
   created/changed/replaced/destroyed nodes and opened/closed dependency edges.
   Managed resources only are displayed, and unresolved relationships are
-  omitted rather than guessed.
+  omitted rather than guessed. A cancelled view request cannot publish stale
+  graph data or layout positions after the user switches away.
 - Run `terraform plan -input=false -out=<file>` + `terraform show -json <file>`
   from the UI, stream output via SSE.
 - Simple yellow findings: SG rule open to 0.0.0.0/0, subnet routed to an IGW,
@@ -90,7 +91,15 @@ unless `--no-browser` is supplied.
 - Redaction server-side: sensitive values stripped before anything reaches the
   browser; raw plan/state JSON never leaves the Go process. Graph payloads
   contain only resource addresses, types, names, semantic kinds, topology
-  relationships, and diff states.
+  relationships, and diff states; node and edge collections are JSON arrays,
+  including for empty views.
+- Topology annotations are presentation-only: user labels and descriptions for
+  nodes and dependency edges never rename Terraform resources or change HCL or
+  state. Selecting a node or labeled dependency edge opens a compact editor;
+  changes stay local until the user explicitly saves them. They persist in the
+  committable workspace-root
+  `rainforest.annotations.json`, keyed by Terraform address or stable dependency
+  edge ID, and apply across Current, Proposed, and Diff views.
 
 ### v0.2 — Edit + full loop
 

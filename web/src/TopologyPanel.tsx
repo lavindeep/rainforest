@@ -1,25 +1,31 @@
-import cytoscape from 'cytoscape'
-import type { Core } from 'cytoscape'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type { Scan } from './App'
+import AnnotationEditor from './AnnotationEditor'
+import SvgTopology from './SvgTopology'
 import './topology.css'
 import {
-  GRAPH_VARS,
-  ZOOM_LIMITS,
+  annotationFor,
+  annotationLabel,
+  annotationsReducer,
+  createAnnotationsState,
+  getAnnotations,
+  putAnnotations,
+} from './annotations'
+import type { AnnotationTarget } from './annotations'
+import {
   clipText,
-  fitComposed,
-  graphElements,
   graphNodeForSelection,
-  graphStyle,
-  presetPositions,
+  layoutTopology,
+  normalizeGraphResponse,
+  sceneForGraph,
   shouldFetchTopology,
   sourceForAddress,
-  unionNodes,
   type GraphNode,
   type GraphResponse,
+  type GraphWireResponse,
   type LayoutSlot,
-  type Palette,
   type TopologyPlanSignal,
+  type TopologySelection,
   type TopologyView,
 } from './topology'
 
@@ -42,13 +48,6 @@ function graphError(view: TopologyView, status: number, error?: string) {
   return `Could not load topology (${status})`
 }
 
-function readPalette(): Palette {
-  const style = getComputedStyle(document.documentElement)
-  return Object.fromEntries(
-    GRAPH_VARS.map((name) => [name, style.getPropertyValue(name).trim()]),
-  ) as Palette
-}
-
 export default function TopologyPanel({ scan, planSignal, onSelectSource }: Props) {
   const [view, setView] = useState<TopologyView>('current')
   const [graphs, setGraphs] = useState<Partial<Record<TopologyView, GraphResponse>>>({})
@@ -57,26 +56,50 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
   const [error, setError] = useState('')
   const [refresh, setRefresh] = useState(0)
   const [hovered, setHovered] = useState<GraphNode | null>(null)
-  const [selected, setSelected] = useState<GraphNode | null>(null)
-  const container = useRef<HTMLDivElement>(null)
-  const cyRef = useRef<Core | null>(null)
+  const [selected, setSelected] = useState<TopologySelection | null>(null)
+  const [annotations, dispatchAnnotations] = useReducer(
+    annotationsReducer,
+    undefined,
+    () => createAnnotationsState(),
+  )
+  const annotationRequest = useRef(0)
   const graph = graphs[view]
   // The three views arrive one response at a time, so this map is laid out
   // several times with a growing node list. Carrying the slots across those
   // passes is what stops a late arrival from re-flowing cards the user is
   // already looking at; it is cleared with the graphs cache below.
   const slots = useRef(new Map<string, LayoutSlot>())
-  const positions = useMemo(
-    () => Object.fromEntries(presetPositions(unionNodes(graphs), slots.current)),
-    [graphs],
-  )
-  const positionsRef = useRef(positions)
-  positionsRef.current = positions
+  const scene = useMemo(() => (graph ? sceneForGraph(graph) : null), [graph])
+  const layout = useMemo(() => (scene ? layoutTopology(scene, slots.current) : null), [scene])
+
+  useEffect(() => {
+    const requestId = ++annotationRequest.current
+    const revision = 0
+    dispatchAnnotations({ type: 'load-start', requestId, revision })
+    void getAnnotations().then(
+      (document) => dispatchAnnotations({
+        type: 'load-success',
+        requestId,
+        revision,
+        document,
+      }),
+      (requestError: unknown) => dispatchAnnotations({
+        type: 'load-failure',
+        requestId,
+        revision,
+        error: requestError instanceof Error
+          ? requestError.message
+          : 'Could not load topology annotations',
+      }),
+    )
+  }, [])
 
   useEffect(() => {
     if (planSignal.revision === 0) return
     slots.current = new Map()
-    setGraphs((current) => ({ current: current.current }))
+    setGraphs((current) => ({
+      current: current.current ? { ...current.current } : undefined,
+    }))
     setError('')
     setSelected(null)
     setHovered(null)
@@ -110,7 +133,8 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
           credentials: 'same-origin',
           signal: controller.signal,
         })
-        const body = (await response.json().catch(() => ({}))) as GraphResponse & { error?: string }
+        const body = (await response.json().catch(() => ({}))) as GraphWireResponse & { error?: string }
+        if (controller.signal.aborted) return
         if (!response.ok) {
           setGraphs((current) => {
             const next = { ...current }
@@ -120,7 +144,13 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
           setError(graphError(requestedView, response.status, body.error))
           return
         }
-        setGraphs((current) => ({ ...current, [requestedView]: body }))
+        const normalized = normalizeGraphResponse(body)
+        if (requestedView === 'diff') {
+          const canonicalSlots = new Map<string, LayoutSlot>()
+          layoutTopology(sceneForGraph(normalized), canonicalSlots)
+          slots.current = canonicalSlots
+        }
+        setGraphs((current) => ({ ...current, [requestedView]: normalized }))
       } catch (requestError) {
         if ((requestError as Error).name !== 'AbortError') {
           setError('Could not reach the topology service')
@@ -132,54 +162,38 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
     return () => controller.abort()
   }, [building, refresh, view])
 
-  useEffect(() => {
-    const target = container.current
-    if (!target || !graph || graph.nodes.length === 0) return
-    cyRef.current?.destroy()
-    const nodesById = new Map(graph.nodes.map((node) => [node.id, node]))
-    const cy = cytoscape({
-      container: target,
-      elements: graphElements(graph),
-      style: graphStyle(readPalette()),
-      ...ZOOM_LIMITS,
-      boxSelectionEnabled: false,
-      autoungrabify: true,
-    })
-    cyRef.current = cy
-    // ponytail: preset over cose — cose diverges on compound graphs in
-    // cytoscape 3.34; revisit if free-form (non-containment) layouts are needed.
-    cy.layout({ name: 'preset', positions: positionsRef.current, animate: false, fit: false }).run()
-    fitComposed(cy)
-    cy.on('mouseover', 'node', (event) => setHovered(nodesById.get(event.target.id()) ?? null))
-    cy.on('mouseout', 'node', () => setHovered(null))
-    cy.on('tap', 'node', (event) => setSelected(nodesById.get(event.target.id()) ?? null))
-    cy.on('tap', (event) => {
-      if (event.target === cy) setSelected(null)
-    })
-    // The pane strip can mount this container zero-sized or hand out a
-    // transient 1x1 measurement, so keep refitting on every resize until the
-    // user pans, zooms or taps the graph — after that the view is theirs.
-    let owned = false
-    cy.on('tapstart dragpan scrollzoom pinchzoom', () => {
-      owned = true
-    })
-    const observer = new ResizeObserver(() => {
-      cy.resize()
-      if (!owned && target.clientWidth > 0 && target.clientHeight > 0) fitComposed(cy)
-    })
-    observer.observe(target)
-    return () => {
-      observer.disconnect()
-      cy.destroy()
-      if (cyRef.current === cy) cyRef.current = null
-    }
-  }, [graph])
-
-  const detail = selected ?? hovered
+  const selectedNode = selected?.kind === 'node'
+    ? graphNodeForSelection(graph?.nodes ?? [], selected.id)
+    : null
+  const selectedEdge = selected?.kind === 'edge'
+    ? scene?.edges.find((edge) => edge.id === selected.id) ?? null
+    : null
+  const detail = selected ? selectedNode : hovered
   const source = useMemo(
     () => (detail && scan ? sourceForAddress(detail.address, scan.blocks) : null),
     [detail, scan],
   )
+
+  function nodeLabel(node: GraphNode) {
+    return annotationLabel(annotations.document, { kind: 'node', key: node.address }, node.name)
+  }
+
+  function edgeLabel(id: string) {
+    return annotationLabel(annotations.document, { kind: 'edge', key: id }, 'depends on')
+  }
+
+  const selectedEdgeSource = selectedEdge
+    ? graphNodeForSelection(scene?.nodes ?? [], selectedEdge.source)
+    : null
+  const selectedEdgeTarget = selectedEdge
+    ? graphNodeForSelection(scene?.nodes ?? [], selectedEdge.target)
+    : null
+
+  const annotationTarget: AnnotationTarget | null = selectedNode
+    ? { kind: 'node', key: selectedNode.address }
+    : selectedEdge
+      ? { kind: 'edge', key: selectedEdge.id }
+      : null
 
   function choose(next: TopologyView) {
     setView(next)
@@ -189,10 +203,29 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
   }
 
   function selectResource(node: GraphNode | null) {
-    setSelected(node)
+    setSelected(node ? { kind: 'node', id: node.id } : null)
     setHovered(null)
-    cyRef.current?.elements().unselect()
-    if (node) cyRef.current?.getElementById(node.id).select()
+  }
+
+  async function saveAnnotations() {
+    if (!annotations.loaded || !annotations.dirty || annotations.savingRequest) return
+    const requestId = ++annotationRequest.current
+    const revision = annotations.revision
+    const document = annotations.document
+    dispatchAnnotations({ type: 'save-start', requestId, revision })
+    try {
+      const saved = await putAnnotations(document)
+      dispatchAnnotations({ type: 'save-success', requestId, revision, document: saved })
+    } catch (requestError) {
+      dispatchAnnotations({
+        type: 'save-failure',
+        requestId,
+        revision,
+        error: requestError instanceof Error
+          ? requestError.message
+          : 'Could not save topology annotations',
+      })
+    }
   }
 
   return (
@@ -214,7 +247,7 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
           <span>Resource</span>
           <select
             id="topology-resource"
-            value={selected?.id ?? ''}
+            value={selected?.kind === 'node' ? selected.id : ''}
             disabled={!graph || graph.nodes.length === 0}
             onChange={(event) =>
               selectResource(graphNodeForSelection(graph?.nodes ?? [], event.target.value))
@@ -223,7 +256,7 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
             <option value="">Inspect resource…</option>
             {graph?.nodes.map((node) => (
               <option key={node.id} value={node.id}>
-                {clipText(`${node.name} — ${node.type} (${node.address})`, 60)}
+                {clipText(`${nodeLabel(node)} — ${node.type} (${node.address})`, 60)}
               </option>
             ))}
           </select>
@@ -231,12 +264,21 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
       </div>
 
       <div className="topology-stage">
-        <div
-          ref={container}
-          className="topology-canvas"
-          role="img"
-          aria-label={`${VIEWS.find((item) => item.id === view)?.label} infrastructure topology`}
-        />
+        {scene && layout && scene.nodes.length > 0 && (
+          <SvgTopology
+            scene={scene}
+            layout={layout}
+            selected={selected}
+            label={`${VIEWS.find((item) => item.id === view)?.label} infrastructure topology`}
+            nodeLabel={nodeLabel}
+            edgeLabel={(edge) => edgeLabel(edge.id)}
+            onHover={setHovered}
+            onSelect={(selection) => {
+              setSelected(selection)
+              setHovered(null)
+            }}
+          />
+        )}
         <div className="topology-status" role={error ? 'alert' : 'status'} aria-live="polite">
           {building && view === 'current'
             ? 'Building proposed topology…'
@@ -246,30 +288,69 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
                 ? error || `No ${view} topology available`
                 : ''}
         </div>
-      </div>
 
-      {detail && (
-        <aside className="topology-detail" aria-live="polite">
-          <div className="topology-detail-text">
-            <span className="topology-detail-type truncate" title={detail.type}>
-              {detail.type}
-            </span>
-            <strong className="truncate" title={detail.name}>
-              {detail.name}
-            </strong>
-            <code className="truncate" title={detail.address}>
-              {detail.address}
-            </code>
-          </div>
-          {source ? (
-            <button type="button" onClick={() => onSelectSource(source.path, source.line)}>
-              Open source
-            </button>
-          ) : (
-            <span className="topology-source-unavailable">Source unavailable</span>
-          )}
-        </aside>
-      )}
+        {(detail || selectedEdge) && (
+          <aside className="topology-detail" aria-live="polite">
+            <div className="topology-detail-summary">
+              <div className="topology-detail-text">
+                {detail ? (
+                  <>
+                    <span className="topology-detail-type truncate" title={detail.type}>
+                      {detail.type}
+                    </span>
+                    <strong className="truncate" title={nodeLabel(detail)}>
+                      {nodeLabel(detail)}
+                    </strong>
+                    <code className="truncate" title={detail.address}>
+                      {detail.address}
+                    </code>
+                  </>
+                ) : selectedEdge ? (
+                  <>
+                    <span className="topology-detail-type">Dependency</span>
+                    <strong className="truncate" title={edgeLabel(selectedEdge.id)}>
+                      {edgeLabel(selectedEdge.id)}
+                    </strong>
+                    <code
+                      className="truncate"
+                      title={`${selectedEdgeSource?.address ?? selectedEdge.source} → ${selectedEdgeTarget?.address ?? selectedEdge.target}`}
+                    >
+                      {selectedEdgeSource ? nodeLabel(selectedEdgeSource) : selectedEdge.source}
+                      {' → '}
+                      {selectedEdgeTarget ? nodeLabel(selectedEdgeTarget) : selectedEdge.target}
+                    </code>
+                  </>
+                ) : null}
+              </div>
+              {detail && source ? (
+                <button type="button" onClick={() => onSelectSource(source.path, source.line)}>
+                  Open source
+                </button>
+              ) : detail ? (
+                <span className="topology-source-unavailable">Source unavailable</span>
+              ) : null}
+            </div>
+            {selected && annotationTarget && (
+              <AnnotationEditor
+                kind={annotationTarget.kind}
+                defaultLabel={selectedNode?.name ?? 'depends on'}
+                annotation={annotationFor(annotations.document, annotationTarget)}
+                loaded={annotations.loaded}
+                dirty={annotations.dirty}
+                saving={annotations.savingRequest !== null}
+                saved={annotations.saved}
+                error={annotations.error}
+                onChange={(annotation) => dispatchAnnotations({
+                  type: 'edit',
+                  target: annotationTarget,
+                  annotation,
+                })}
+                onSave={() => void saveAnnotations()}
+              />
+            )}
+          </aside>
+        )}
+      </div>
     </div>
   )
 }
