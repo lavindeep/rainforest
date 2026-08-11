@@ -1226,9 +1226,9 @@ done`
 		{
 			name:          "malformed JSON",
 			planBody:      planBody,
-			showBody:      `echo '{not-json'`,
+			showBody:      `printf '%s\n' '{bogus CANARYCHAR'`,
 			wantState:     "error",
-			wantShowError: "terraform show JSON",
+			wantShowError: "terraform show returned invalid JSON",
 		},
 		{
 			name:              "empty successful show",
@@ -1252,6 +1252,65 @@ done`
 			done := planDoneEvent(t, s)
 			if done.State != tt.wantState || (done.Counts != nil) != tt.wantCountsPresent || done.Err != summary.Err {
 				t.Errorf("done = %+v, want state=%q countsPresent=%v err=%q", done, tt.wantState, tt.wantCountsPresent, summary.Err)
+			}
+		})
+	}
+}
+
+func TestPlanInvalidShowJSONIsRedactedFromAllSurfaces(t *testing.T) {
+	planBody := `for arg in "$@"; do
+  case "$arg" in -out=*) planfile=${arg#-out=}; : > "$planfile" ;; esac
+done`
+	for _, tt := range []struct {
+		name     string
+		showBody string
+		leaks    []string
+	}{
+		{
+			name:     "malformed document",
+			showBody: `printf '%s\n' '{bogus CANARYCHAR'`,
+			leaks:    []string{"invalid character", "'b'", "CANARYCHAR"},
+		},
+		{
+			name:     "invalid graph shape",
+			showBody: `printf '%s\n' '{"resource_changes":[],"planned_values":"CANARYCHAR"}'`,
+			leaks:    []string{"cannot unmarshal", "CANARYCHAR"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			planScript(t, planBody, tt.showBody)
+			s := newPlanTestServerIn(t, initializedWorkspace(t))
+			startPlan(t, s)
+
+			_, summary := waitForSummary(t, s)
+			if summary.State != "error" || summary.ShowError != "terraform show returned invalid JSON" || summary.Err != summary.ShowError {
+				t.Errorf("summary = %+v, want generic invalid JSON error", summary)
+			}
+			rec := authenticatedRequest(t, s, http.MethodGet, "/api/plan/events", nil)
+			events := parseSSE(t, rec.Body.Bytes())
+			if len(events) != 2 || events[0].Name != "line" || events[1].Name != "done" {
+				t.Fatalf("events = %+v, want system line and done", events)
+			}
+			var line planLine
+			if err := json.Unmarshal(events[0].Data, &line); err != nil {
+				t.Fatalf("decode system line: %v", err)
+			}
+			if line.Stream != "system" || line.Text != "terraform show returned invalid JSON" {
+				t.Errorf("system line = %+v, want generic invalid JSON error", line)
+			}
+			var done planDoneBody
+			if err := json.Unmarshal(events[1].Data, &done); err != nil {
+				t.Fatalf("decode done event: %v", err)
+			}
+			if done.State != "error" || done.Counts != nil || done.Err != "terraform show returned invalid JSON" {
+				t.Errorf("done = %+v, want generic invalid JSON error", done)
+			}
+			for _, surface := range []string{summary.ShowError, summary.Err, rec.Body.String()} {
+				for _, leaked := range tt.leaks {
+					if strings.Contains(surface, leaked) {
+						t.Errorf("surface leaked %q from terraform output: %s", leaked, surface)
+					}
+				}
 			}
 		})
 	}

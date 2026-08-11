@@ -216,18 +216,64 @@ func TestGraphStatuses(t *testing.T) {
 	})
 	t.Run("current invalid json", func(t *testing.T) {
 		workspace := initializedWorkspace(t)
-		stubTerraform(t, `echo 'not json'`)
+		stubTerraform(t, `printf '%s\n' '{bogus CANARYCHAR'`)
 		rec := get(t, newPlanTestServerIn(t, workspace), "/api/graph")
 		if rec.Code != http.StatusInternalServerError {
-			t.Errorf("status = %d, want 500", rec.Code)
+			t.Fatalf("status = %d, want 500 (body %q)", rec.Code, rec.Body.String())
+		}
+		if rec.Body.String() != "{\"error\":\"terraform show returned invalid JSON\"}\n" {
+			t.Errorf("body = %q, want generic invalid JSON error", rec.Body.String())
+		}
+		for _, leaked := range []string{"invalid character", "'b'", "CANARYCHAR"} {
+			if strings.Contains(rec.Body.String(), leaked) {
+				t.Errorf("body leaked %q from terraform output: %s", leaked, rec.Body.String())
+			}
 		}
 	})
-	t.Run("proposed no run", func(t *testing.T) {
-		rec := get(t, newPlanTestServerIn(t, t.TempDir()), "/api/graph?view=proposed")
-		if rec.Code != http.StatusNotFound {
-			t.Errorf("status = %d, want 404", rec.Code)
+	t.Run("plan views unavailable before first run", func(t *testing.T) {
+		s := newPlanTestServerIn(t, t.TempDir())
+		for _, view := range []string{"proposed", "diff"} {
+			rec := get(t, s, "/api/graph?view="+view)
+			if rec.Code != http.StatusConflict {
+				t.Errorf("%s status = %d, want 409", view, rec.Code)
+			}
+			if rec.Body.String() != "{\"error\":\"plan graph unavailable\"}\n" {
+				t.Errorf("%s body = %q, want exact unavailable error", view, rec.Body.String())
+			}
 		}
 	})
+}
+
+func TestGraphCurrentReturnsBusyDuringPlanAndRecovers(t *testing.T) {
+	workspace := initializedWorkspace(t)
+	planScript(t, `: > "$PWD/plan-ready"
+while [ ! -f "$PWD/continue" ]; do /bin/sleep 0.01; done
+for arg in "$@"; do
+  case "$arg" in -out=*) planfile=${arg#-out=}; : > "$planfile" ;; esac
+done`, `printf '%s\n' '`+graphPlanFixture+`'`)
+	s := newPlanTestServerIn(t, workspace)
+	startPlan(t, s)
+	waitForFile(t, filepath.Join(workspace, "plan-ready"))
+
+	rec := get(t, s, "/api/graph?view=current")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("busy status = %d, want 409 (body %q)", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "{\"error\":\"terraform is busy\"}\n" {
+		t.Errorf("busy body = %q, want exact busy error", rec.Body.String())
+	}
+
+	if err := os.WriteFile(filepath.Join(workspace, "continue"), nil, 0o600); err != nil {
+		t.Fatalf("release plan: %v", err)
+	}
+	_, summary := waitForSummary(t, s)
+	if summary.State != "succeeded" {
+		t.Fatalf("plan state = %q, want succeeded", summary.State)
+	}
+	rec = get(t, s, "/api/graph?view=current")
+	if rec.Code != http.StatusOK {
+		t.Errorf("recovered status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+	}
 }
 
 func TestParsePlanGraphsKeepsChildModuleInstancesAligned(t *testing.T) {

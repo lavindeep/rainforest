@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -183,7 +184,7 @@ func (s *Server) planGraph(w http.ResponseWriter, view string) {
 	s.planMu.Lock()
 	if s.plan == nil {
 		s.planMu.Unlock()
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no plan has been run"})
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "plan graph unavailable"})
 		return
 	}
 	run := s.plan
@@ -281,7 +282,8 @@ func (s *Server) currentGraph(w http.ResponseWriter) {
 	}
 	graph, err := parseCurrentGraph(stdout.Bytes())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "terraform show JSON: " + err.Error()})
+		log.Printf("parse current terraform show JSON: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": terraformShowInvalidJSON})
 		return
 	}
 	graph.View = "current"
