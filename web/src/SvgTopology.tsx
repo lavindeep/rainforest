@@ -2,7 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent, PointerEvent } from 'react'
 import {
   clipText,
+  EDGE_LABEL_HEIGHT,
+  EDGE_LABEL_WIDTH,
+  edgeLabelPoint,
   fitViewport,
+  glyphForNode,
   LABEL_CHARS,
   layoutTopology,
   nodesByContainmentDepth,
@@ -11,6 +15,7 @@ import {
   type GraphNode,
   type Viewport,
 } from './topology'
+import TopologyGlyph from './TopologyGlyph'
 
 type Scene = ReturnType<typeof sceneForGraph>
 type Layout = ReturnType<typeof layoutTopology>
@@ -29,10 +34,6 @@ const EMPTY_VIEWPORT: Viewport = { x: 0, y: 0, zoom: 1, owned: false }
 
 function pathFor(points: Point[]) {
   if (points.length === 0) return ''
-  if (points.length === 4) {
-    const [start, first, second, end] = points
-    return `M ${start.x} ${start.y} C ${first.x} ${first.y} ${second.x} ${second.y} ${end.x} ${end.y}`
-  }
   return points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ')
 }
 
@@ -65,7 +66,7 @@ export default function SvgTopology({
       if (width <= 0 || height <= 0) return
       const next = { width, height }
       size.current = next
-      setViewport((current) => fitViewport(layout.nodes, next, current))
+      setViewport((current) => fitViewport(layout.nodes, next, current, layout.edges))
     })
     observer.observe(target)
     return () => observer.disconnect()
@@ -91,7 +92,7 @@ export default function SvgTopology({
     const currentSize = size.current
     setViewport(
       currentSize.width > 0 && currentSize.height > 0
-        ? fitViewport(layout.nodes, currentSize)
+        ? fitViewport(layout.nodes, currentSize, undefined, layout.edges)
         : EMPTY_VIEWPORT,
     )
   }, [layout])
@@ -135,6 +136,11 @@ export default function SvgTopology({
   function nodeGroup(node: GraphNode, compound: boolean) {
     const box = layout.nodes.get(node.id)
     if (!box) return null
+    const tileSize = compound ? 18 : 38
+    const tileX = box.x + 10
+    const tileY = box.y + (compound ? 6 : 10)
+    const textX = tileX + tileSize + (compound ? 7 : 10)
+    const textLimit = compound ? LABEL_CHARS : LABEL_CHARS - 6
     return (
       <g
         key={node.id}
@@ -155,6 +161,7 @@ export default function SvgTopology({
         onKeyDown={(event) => selectWithKeyboard(event, node)}
       >
         <rect
+          className="topology-node-surface"
           x={box.x}
           y={box.y}
           width={box.w}
@@ -171,20 +178,21 @@ export default function SvgTopology({
               }
             : {})}
         />
+        <TopologyGlyph kind={glyphForNode(node)} x={tileX} y={tileY} size={tileSize} />
         <text
-          x={compound ? box.x + 10 : box.x + box.w / 2}
-          y={compound ? box.y + 15 : box.y + box.h / 2 - 3}
-          textAnchor={compound ? 'start' : 'middle'}
+          x={textX}
+          y={compound ? box.y + 12 : box.y + 22}
+          textAnchor="start"
         >
-          <tspan x={compound ? box.x + 10 : box.x + box.w / 2}>
-            {clipText(node.type, LABEL_CHARS)}
+          <tspan className="topology-node-type" x={textX}>
+            {clipText(node.type, textLimit)}
           </tspan>
           <tspan
             className="topology-node-name"
-            x={compound ? box.x + 10 : box.x + box.w / 2}
-            dy="1.45em"
+            x={textX}
+            dy={compound ? '1.2em' : '1.55em'}
           >
-            {clipText(node.name, LABEL_CHARS)}
+            {clipText(node.name, textLimit)}
           </tspan>
         </text>
       </g>
@@ -217,18 +225,32 @@ export default function SvgTopology({
       />
       <g transform={`translate(${viewport.x} ${viewport.y}) scale(${viewport.zoom})`}>
         {compoundNodes.map((node) => nodeGroup(node, true))}
-        {layout.edges.map((edge) => (
-          <path
-            key={edge.id}
-            className={`topology-edge${stateClass(edge.state)}`}
-            d={pathFor(edge.points)}
-            markerEnd={
-              edge.state === 'opened' || edge.state === 'closed'
-                ? `url(#topology-arrow-${edge.state})`
-                : 'url(#topology-arrow)'
-            }
-          />
-        ))}
+        {layout.edges.map((edge) => {
+          const point = edgeLabelPoint(edge.points)
+          return (
+            <g key={edge.id} className="topology-edge-group">
+              <path
+                className={`topology-edge${stateClass(edge.state)}`}
+                d={pathFor(edge.points)}
+                markerEnd={
+                  edge.state === 'opened' || edge.state === 'closed'
+                    ? `url(#topology-arrow-${edge.state})`
+                    : 'url(#topology-arrow)'
+                }
+              />
+              <g className="topology-edge-label" transform={`translate(${point.x} ${point.y})`}>
+                <rect
+                  x={-EDGE_LABEL_WIDTH / 2}
+                  y={-EDGE_LABEL_HEIGHT / 2}
+                  width={EDGE_LABEL_WIDTH}
+                  height={EDGE_LABEL_HEIGHT}
+                  rx="4"
+                />
+                <text y="3" textAnchor="middle">depends on</text>
+              </g>
+            </g>
+          )
+        })}
         {leafNodes.map((node) => nodeGroup(node, false))}
       </g>
     </svg>

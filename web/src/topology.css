@@ -110,65 +110,74 @@
   outline: none;
 }
 
-.topology-node rect {
+.topology-node-surface {
   fill: var(--elev-3);
   stroke: var(--card-border);
   stroke-width: 1;
 }
 
 .topology-node text {
-  fill: var(--muted);
-  font-size: 11px;
   pointer-events: none;
+}
+
+.topology-node-type {
+  fill: var(--muted);
+  font-size: 9px;
 }
 
 .topology-node-name {
   fill: var(--text);
+  font-size: 11px;
+  font-weight: 600;
 }
 
-.topology-compound rect {
+.topology-compound > .topology-node-surface {
   fill: var(--elev-1);
   stroke: var(--elev-2);
 }
 
-.topology-compound text {
-  font-size: 10px;
+.topology-compound .topology-node-type {
+  font-size: 8px;
 }
 
-.topology-node:hover rect,
-.topology-node.selected rect,
-.topology-node:focus-visible rect {
+.topology-compound .topology-node-name {
+  font-size: 9px;
+}
+
+.topology-node:hover > .topology-node-surface,
+.topology-node.selected > .topology-node-surface,
+.topology-node:focus-visible > .topology-node-surface {
   stroke: var(--text);
   stroke-width: 2;
 }
 
-.topology-node.state-created rect {
+.topology-node.state-created > .topology-node-surface {
   stroke: var(--green);
   stroke-width: 2;
 }
 
-.topology-node.state-changed rect {
+.topology-node.state-changed > .topology-node-surface {
   stroke: var(--amber);
   stroke-width: 2;
 }
 
-.topology-node.state-replaced rect {
+.topology-node.state-replaced > .topology-node-surface {
   stroke: var(--orange);
   stroke-width: 2;
 }
 
-.topology-node.state-destroyed rect {
+.topology-node.state-destroyed > .topology-node-surface {
   stroke: var(--red);
   stroke-width: 2;
   stroke-dasharray: 5 4;
 }
 
-.topology-node.state-destroyed:not(.topology-compound) rect {
+.topology-node.state-destroyed:not(.topology-compound) > .topology-node-surface {
   fill-opacity: 0.72;
 }
 
-.topology-node.selected rect,
-.topology-node:focus-visible rect {
+.topology-node.selected > .topology-node-surface,
+.topology-node:focus-visible > .topology-node-surface {
   stroke: var(--text);
   stroke-width: 3;
 }
@@ -178,6 +187,50 @@
   stroke: var(--edge);
   stroke-width: 1;
 }
+
+.topology-edge-label {
+  pointer-events: none;
+}
+
+.topology-edge-label rect {
+  fill: var(--edge-label-bg);
+  stroke: var(--edge-label-border);
+  stroke-width: 1;
+}
+
+.topology-edge-label text {
+  fill: var(--edge-label-text);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.topology-tile-surface {
+  fill: var(--tile-generic);
+}
+
+.topology-tile {
+  pointer-events: none;
+}
+
+.topology-glyph {
+  fill: none;
+  stroke: var(--tile-glyph);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tile-network .topology-tile-surface { fill: var(--tile-network); }
+.tile-subnet .topology-tile-surface { fill: var(--tile-subnet); }
+.tile-route .topology-tile-surface { fill: var(--tile-route); }
+.tile-gateway .topology-tile-surface { fill: var(--tile-gateway); }
+.tile-security .topology-tile-surface { fill: var(--tile-security); }
+.tile-compute .topology-tile-surface { fill: var(--tile-compute); }
+.tile-interface .topology-tile-surface { fill: var(--tile-interface); }
+.tile-database .topology-tile-surface { fill: var(--tile-database); }
+.tile-storage .topology-tile-surface { fill: var(--tile-storage); }
+.tile-generic .topology-tile-surface { fill: var(--tile-generic); }
 
 #topology-arrow path {
   fill: var(--edge);

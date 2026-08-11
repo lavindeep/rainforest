@@ -48,6 +48,48 @@ export type GraphNode = {
   state?: NodeState
 }
 
+export type GlyphKind =
+  | 'network'
+  | 'subnet'
+  | 'route'
+  | 'gateway'
+  | 'security'
+  | 'compute'
+  | 'interface'
+  | 'database'
+  | 'storage'
+  | 'generic'
+
+const GLYPHS_BY_KIND: Record<string, GlyphKind> = {
+  vpc: 'network',
+  subnet: 'subnet',
+  'route-table': 'route',
+  route: 'route',
+  'route-table-association': 'route',
+  'internet-gateway': 'gateway',
+  'nat-gateway': 'gateway',
+  'security-group': 'security',
+  'security-group-rule': 'security',
+  instance: 'compute',
+  eni: 'interface',
+}
+
+const DATABASE_TYPES = new Set([
+  'aws_db_instance',
+  'aws_rds_cluster',
+  'aws_rds_cluster_instance',
+  'aws_dynamodb_table',
+])
+
+const STORAGE_TYPES = new Set(['aws_s3_bucket', 'aws_s3_object', 'aws_s3_bucket_object'])
+
+export function glyphForNode(node: GraphNode): GlyphKind {
+  if (node.kind !== 'generic') return GLYPHS_BY_KIND[node.kind] ?? 'generic'
+  if (DATABASE_TYPES.has(node.type)) return 'database'
+  if (STORAGE_TYPES.has(node.type)) return 'storage'
+  return 'generic'
+}
+
 export function graphNodeForSelection(nodes: GraphNode[], id: string) {
   return nodes.find((node) => node.id === id) ?? null
 }
@@ -88,9 +130,12 @@ const MIN_ZOOM = 0.05
 export const ZOOM_LIMITS = { minZoom: MIN_ZOOM, maxZoom: 2.5 }
 const GRID_GAP = 36
 const GROUP_PAD = 28
-const MAX_PER_ROW = 3
-const FIT_MARGIN = 48
-export const LABEL_CHARS = 23
+const MAX_PER_ROW = 2
+const FIT_MARGIN = 24
+export const LABEL_CHARS = 18
+export const EDGE_LABEL_WIDTH = 62
+export const EDGE_LABEL_HEIGHT = 16
+const EDGE_GUTTER = 16
 const MAX_CONTAINMENT_DEPTH = 32
 
 // Missing, self-referential and cyclic parents are dropped: malformed data has
@@ -130,9 +175,6 @@ export type Viewport = { x: number; y: number; zoom: number; owned: boolean }
 // slot is recorded the first time it is placed and reused for the life of the
 // map, so a late response can only append cards, never shove drawn ones
 // sideways. Omit it to lay out from scratch.
-// ponytail: an anchored compound that gains children grows down and right and
-// can reach a neighbour anchored below it. Reserve a whole row per compound if
-// that ever shows up on a real plan.
 function presetPositions(nodes: GraphNode[], slots = new Map<string, LayoutSlot>()) {
   const parents = parentMap(nodes)
   const children = new Map<string, GraphNode[]>()
@@ -188,7 +230,8 @@ function presetPositions(nodes: GraphNode[], slots = new Map<string, LayoutSlot>
     let rowH = 0
     let inRow = 0
     for (const item of fresh) {
-      if (inRow === MAX_PER_ROW) {
+      const compound = (children.get(item.id)?.length ?? 0) > 0
+      if (inRow === MAX_PER_ROW || (compound && inRow > 0)) {
         rowY += rowH + GRID_GAP
         rowX = x
         rowH = 0
@@ -200,6 +243,12 @@ function presetPositions(nodes: GraphNode[], slots = new Map<string, LayoutSlot>
       right = Math.max(right, rowX - GRID_GAP)
       bottom = Math.max(bottom, rowY + rowH)
       inRow++
+      if (compound) {
+        rowY += rowH + GRID_GAP
+        rowX = x
+        rowH = 0
+        inRow = 0
+      }
     }
     return { w: right - x, h: bottom - y }
   }
@@ -213,6 +262,132 @@ function hasAncestor(parents: Map<string, string>, id: string, ancestorId: strin
     if (parent === ancestorId) return true
   }
   return false
+}
+
+function center(box: Rect): Point {
+  return { x: box.x + box.w / 2, y: box.y + box.h / 2 }
+}
+
+function horizontalRoute(source: Rect, target: Rect): Point[] {
+  const from = center(source)
+  const to = center(target)
+  const right = from.x <= to.x
+  const start = { x: right ? source.x + source.w : source.x, y: from.y }
+  const end = { x: right ? target.x : target.x + target.w, y: to.y }
+  const middle = (start.x + end.x) / 2
+  return [start, { x: middle, y: start.y }, { x: middle, y: end.y }, end]
+}
+
+function verticalRoute(source: Rect, target: Rect): Point[] {
+  const from = center(source)
+  const to = center(target)
+  const down = from.y <= to.y
+  const start = { x: from.x, y: down ? source.y + source.h : source.y }
+  const end = { x: to.x, y: down ? target.y : target.y + target.h }
+  const middle = (start.y + end.y) / 2
+  return [start, { x: start.x, y: middle }, { x: end.x, y: middle }, end]
+}
+
+function boxesOverlap(first: Rect, second: Rect) {
+  return first.x < second.x + second.w && first.x + first.w > second.x &&
+    first.y < second.y + second.h && first.y + first.h > second.y
+}
+
+function segmentCrossesBox(start: Point, end: Point, box: Rect) {
+  if (start.x === end.x) {
+    return start.x > box.x && start.x < box.x + box.w &&
+      Math.max(start.y, end.y) > box.y && Math.min(start.y, end.y) < box.y + box.h
+  }
+  return start.y > box.y && start.y < box.y + box.h &&
+    Math.max(start.x, end.x) > box.x && Math.min(start.x, end.x) < box.x + box.w
+}
+
+function routeIsClear(points: Point[], obstacles: Rect[], labelObstacles: Rect[]) {
+  for (let index = 1; index < points.length; index++) {
+    if (obstacles.some((box) => segmentCrossesBox(points[index - 1], points[index], box))) {
+      return false
+    }
+  }
+  const label = edgeLabelPoint(points)
+  const labelBox = {
+    x: label.x - EDGE_LABEL_WIDTH / 2,
+    y: label.y - EDGE_LABEL_HEIGHT / 2,
+    w: EDGE_LABEL_WIDTH,
+    h: EDGE_LABEL_HEIGHT,
+  }
+  return !labelObstacles.some((box) => boxesOverlap(labelBox, box))
+}
+
+function orthogonalPoints(
+  source: Rect,
+  target: Rect,
+  leafBoxes: Rect[],
+  edgeIndex: number,
+): Point[] {
+  const from = center(source)
+  const to = center(target)
+  const left = Math.min(...leafBoxes.map((box) => box.x))
+  const top = Math.min(...leafBoxes.map((box) => box.y))
+  const right = Math.max(...leafBoxes.map((box) => box.x + box.w))
+  const bottom = Math.max(...leafBoxes.map((box) => box.y + box.h))
+  const laneOffset = EDGE_GUTTER + edgeIndex * (EDGE_LABEL_HEIGHT + EDGE_GUTTER)
+  const topLane = top - EDGE_LABEL_HEIGHT / 2 - laneOffset
+  const bottomLane = bottom + EDGE_LABEL_HEIGHT / 2 + laneOffset
+  const leftLane = left - EDGE_LABEL_WIDTH / 2 - laneOffset
+  const rightLane = right + EDGE_LABEL_WIDTH / 2 + laneOffset
+  const candidates = [
+    horizontalRoute(source, target),
+    verticalRoute(source, target),
+    [
+      { x: from.x, y: source.y },
+      { x: from.x, y: topLane },
+      { x: to.x, y: topLane },
+      { x: to.x, y: target.y },
+    ],
+    [
+      { x: from.x, y: source.y + source.h },
+      { x: from.x, y: bottomLane },
+      { x: to.x, y: bottomLane },
+      { x: to.x, y: target.y + target.h },
+    ],
+    [
+      { x: source.x, y: from.y },
+      { x: leftLane, y: from.y },
+      { x: leftLane, y: to.y },
+      { x: target.x, y: to.y },
+    ],
+    [
+      { x: source.x + source.w, y: from.y },
+      { x: rightLane, y: from.y },
+      { x: rightLane, y: to.y },
+      { x: target.x + target.w, y: to.y },
+    ],
+  ]
+  if (Math.abs(from.y - to.y) > Math.abs(from.x - to.x)) {
+    const horizontal = candidates[0]
+    candidates[0] = candidates[1]
+    candidates[1] = horizontal
+  }
+  const obstacles = leafBoxes.filter((box) => box !== source && box !== target)
+  return candidates.find((points) => routeIsClear(points, obstacles, leafBoxes)) ?? candidates[2]
+}
+
+export function edgeLabelPoint(points: Point[]): Point {
+  if (points.length < 2) return points[0] ?? { x: 0, y: 0 }
+  let longest = [points[0], points[1]] as const
+  let longestLength = Math.abs(longest[0].x - longest[1].x) + Math.abs(longest[0].y - longest[1].y)
+  for (let index = 2; index < points.length; index++) {
+    const segment = [points[index - 1], points[index]] as const
+    const length = Math.abs(segment[0].x - segment[1].x) + Math.abs(segment[0].y - segment[1].y)
+    if (length > longestLength) {
+      longest = segment
+      longestLength = length
+    }
+  }
+  return {
+    x: (longest[0].x + longest[1].x) / 2,
+    y: (longest[0].y + longest[1].y) / 2,
+  }
 }
 
 // Renderer-neutral graph data: preserve presentation state, but only expose
@@ -292,16 +467,16 @@ export function layoutTopology(
   for (const node of scene.nodes) {
     rectangle(node.id)
   }
-  const edges = scene.edges.flatMap((edge) => {
+  const leafBoxes = [...nodes]
+    .filter(([id]) => !children.has(id))
+    .map(([, box]) => box)
+  const edges = scene.edges.flatMap((edge, edgeIndex) => {
     const source = nodes.get(edge.source)
     const target = nodes.get(edge.target)
     if (!source || !target) return []
     return [{
       ...edge,
-      points: [
-        { x: source.x + source.w / 2, y: source.y + source.h / 2 },
-        { x: target.x + target.w / 2, y: target.y + target.h / 2 },
-      ],
+      points: orthogonalPoints(source, target, leafBoxes, edgeIndex),
     }]
   })
   return { nodes, edges }
@@ -311,11 +486,28 @@ export function fitViewport(
   nodes: Map<string, Rect>,
   size: { width: number; height: number },
   current?: Viewport,
+  edges: ReadonlyArray<{ points: Point[] }> = [],
 ): Viewport {
   if (current?.owned) return current
-  if (nodes.size === 0) return { x: size.width / 2, y: size.height / 2, zoom: 1, owned: false }
-
   const boxes = [...nodes.values()]
+  for (const edge of edges) {
+    if (edge.points.length === 0) continue
+    const label = edgeLabelPoint(edge.points)
+    boxes.push({
+      x: Math.min(...edge.points.map((point) => point.x)),
+      y: Math.min(...edge.points.map((point) => point.y)),
+      w: Math.max(...edge.points.map((point) => point.x)) - Math.min(...edge.points.map((point) => point.x)),
+      h: Math.max(...edge.points.map((point) => point.y)) - Math.min(...edge.points.map((point) => point.y)),
+    })
+    boxes.push({
+      x: label.x - EDGE_LABEL_WIDTH / 2,
+      y: label.y - EDGE_LABEL_HEIGHT / 2,
+      w: EDGE_LABEL_WIDTH,
+      h: EDGE_LABEL_HEIGHT,
+    })
+  }
+  if (boxes.length === 0) return { x: size.width / 2, y: size.height / 2, zoom: 1, owned: false }
+
   const left = Math.min(...boxes.map((box) => box.x))
   const top = Math.min(...boxes.map((box) => box.y))
   const right = Math.max(...boxes.map((box) => box.x + box.w))

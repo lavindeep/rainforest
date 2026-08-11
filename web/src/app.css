@@ -18,6 +18,20 @@
   --elev-3: #355373;
   --card-border: #86a2c2;
   --edge: #a5b9d1;
+  --edge-label-bg: #dce8f5;
+  --edge-label-border: #6e849d;
+  --edge-label-text: #0b0f14;
+  --tile-glyph: #f8fbff;
+  --tile-network: #245fae;
+  --tile-subnet: #087783;
+  --tile-route: #714aa2;
+  --tile-gateway: #a14718;
+  --tile-security: #9b315b;
+  --tile-compute: #5946ad;
+  --tile-interface: #006a63;
+  --tile-database: #176840;
+  --tile-storage: #805711;
+  --tile-generic: #4d6076;
 
   font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   font-size: 14px;

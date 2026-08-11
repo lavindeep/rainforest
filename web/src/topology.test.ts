@@ -5,10 +5,14 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import {
   CARD_W,
+  EDGE_LABEL_HEIGHT,
+  EDGE_LABEL_WIDTH,
   LABEL_CHARS,
   ZOOM_LIMITS,
   clipText,
+  edgeLabelPoint,
   graphNodeForSelection,
+  glyphForNode,
   fitViewport,
   layoutTopology,
   nodesByContainmentDepth,
@@ -98,6 +102,19 @@ const GRAPH_VARS = [
   '--elev-3',
   '--card-border',
   '--edge',
+] as const
+
+const TILE_VARS = [
+  '--tile-network',
+  '--tile-subnet',
+  '--tile-route',
+  '--tile-gateway',
+  '--tile-security',
+  '--tile-compute',
+  '--tile-interface',
+  '--tile-database',
+  '--tile-storage',
+  '--tile-generic',
 ] as const
 
 const palette = Object.fromEntries(GRAPH_VARS.map((name) => [name, cssVariables.get(name) ?? ''])) as Record<
@@ -250,10 +267,7 @@ test('seeding slots from Diff keeps leaf-compound transitions stable and separat
     { x: leaf.x + leaf.w / 2, y: leaf.y + leaf.h / 2 },
     { x: compound.x + compound.w / 2, y: compound.y + compound.h / 2 },
   )
-  assert.ok(
-    compound.x + compound.w <= sibling.x || sibling.x + sibling.w <= compound.x,
-    'sibling overlaps transitioned compound',
-  )
+  assert.ok(!boxesOverlap(compound, sibling), 'sibling overlaps transitioned compound')
 })
 
 test('layoutTopology packs leaf cards without overlap', () => {
@@ -265,6 +279,140 @@ test('layoutTopology packs leaf cards without overlap', () => {
   assert.equal(subnet.y, sg.y)
   assert.ok(subnet.x + subnet.w <= sg.x || sg.x + sg.w <= subnet.x)
   assert.deepEqual(layoutTopology(sceneForGraph(graph)).nodes, positions)
+})
+
+test('glyphs map semantic kinds and simple generic resource types', () => {
+  const cases = [
+    ['vpc', 'aws_vpc', 'network'],
+    ['subnet', 'aws_subnet', 'subnet'],
+    ['route-table', 'aws_route_table', 'route'],
+    ['route', 'aws_route', 'route'],
+    ['route-table-association', 'aws_route_table_association', 'route'],
+    ['internet-gateway', 'aws_internet_gateway', 'gateway'],
+    ['nat-gateway', 'aws_nat_gateway', 'gateway'],
+    ['security-group', 'aws_security_group', 'security'],
+    ['security-group-rule', 'aws_security_group_rule', 'security'],
+    ['instance', 'aws_instance', 'compute'],
+    ['eni', 'aws_network_interface', 'interface'],
+    ['generic', 'aws_db_instance', 'database'],
+    ['generic', 'aws_s3_bucket', 'storage'],
+    ['generic', 'terraform_data', 'generic'],
+  ] as const
+
+  for (const [kind, type, glyph] of cases) {
+    assert.equal(glyphForNode({ ...node('resource', kind), type }), glyph)
+  }
+
+  for (const type of [
+    'aws_db_parameter_group',
+    'aws_s3_bucket_policy',
+    'aws_s3_bucket_notification',
+    'google_storage_bucket_iam_policy',
+  ]) {
+    assert.equal(glyphForNode({ ...node('resource', 'generic'), type }), 'generic')
+  }
+})
+
+function boxesOverlap(
+  first: { x: number; y: number; w: number; h: number },
+  second: { x: number; y: number; w: number; h: number },
+) {
+  return first.x < second.x + second.w && first.x + first.w > second.x &&
+    first.y < second.y + second.h && first.y + first.h > second.y
+}
+
+test('edge routes and labels clear adjacent and intervening cards', () => {
+  for (const [name, target] of [['adjacent', 'b'], ['skipped', 'c']] as const) {
+    const nodes = [node('a', 'instance'), node('b', 'instance'), node('c', 'instance')]
+    const scene = sceneForGraph({
+      view: 'current',
+      runId: 'run-1',
+      nodes,
+      edges: [{ id: name, source: 'a', target, kind: 'dependency' }],
+    })
+    const slots = new Map<string, LayoutSlot>([
+      ['a', { x: 0, y: 0, w: 172, h: 58 }],
+      ['b', { x: 208, y: 0, w: 172, h: 58 }],
+      ['c', { x: 416, y: 0, w: 172, h: 58 }],
+    ])
+    const layout = layoutTopology(scene, slots)
+    const edge = layout.edges[0]
+    const label = edgeLabelPoint(edge.points)
+    const labelBox = {
+      x: label.x - EDGE_LABEL_WIDTH / 2,
+      y: label.y - EDGE_LABEL_HEIGHT / 2,
+      w: EDGE_LABEL_WIDTH,
+      h: EDGE_LABEL_HEIGHT,
+    }
+    for (const [id, box] of layout.nodes) {
+      assert.ok(!boxesOverlap(labelBox, box), `${name} label overlaps ${id}`)
+      if (id === edge.source || id === edge.target) continue
+      for (let index = 1; index < edge.points.length; index++) {
+        const [start, end] = [edge.points[index - 1], edge.points[index]]
+        const segment = {
+          x: Math.min(start.x, end.x),
+          y: Math.min(start.y, end.y),
+          w: Math.max(1, Math.abs(start.x - end.x)),
+          h: Math.max(1, Math.abs(start.y - end.y)),
+        }
+        assert.ok(!boxesOverlap(segment, box), `${name} route crosses ${id}`)
+      }
+    }
+  }
+})
+
+test('the mock-sized topology stays near 1:1 in its 506x696 pane', () => {
+  const nodes = [
+    node('vpc', 'vpc'),
+    node('public', 'subnet', 'vpc'),
+    node('private', 'subnet', 'vpc'),
+    node('igw', 'internet-gateway', 'vpc'),
+    node('sg', 'security-group', 'vpc'),
+    node('web', 'instance', 'public'),
+    node('nat', 'nat-gateway', 'public'),
+  ]
+  const layout = layoutTopology(sceneForGraph({ view: 'current', runId: 'run-1', nodes, edges: [] }))
+
+  assert.ok(fitViewport(layout.nodes, { width: 506, height: 696 }).zoom >= 0.9)
+})
+
+test('fitViewport keeps repeated edge lanes and labels inside the canvas', () => {
+  const nodes = [node('a', 'instance'), node('b', 'instance'), node('c', 'instance')]
+  const scene = sceneForGraph({
+    view: 'current',
+    runId: 'run-1',
+    nodes,
+    edges: Array.from({ length: 4 }, (_, index) => ({
+      id: `edge-${index}`,
+      source: 'a',
+      target: 'c',
+      kind: 'dependency' as const,
+    })),
+  })
+  const slots = new Map<string, LayoutSlot>([
+    ['a', { x: 0, y: 0, w: 172, h: 58 }],
+    ['b', { x: 0, y: 94, w: 172, h: 58 }],
+    ['c', { x: 0, y: 188, w: 172, h: 58 }],
+  ])
+  const layout = layoutTopology(scene, slots)
+  const size = { width: 506, height: 696 }
+  const viewport = fitViewport(layout.nodes, size, undefined, layout.edges)
+
+  for (const edge of layout.edges) {
+    for (const point of edge.points) {
+      const x = point.x * viewport.zoom + viewport.x
+      const y = point.y * viewport.zoom + viewport.y
+      assert.ok(x >= 0 && x <= size.width, `${edge.id} path is clipped horizontally`)
+      assert.ok(y >= 0 && y <= size.height, `${edge.id} path is clipped vertically`)
+    }
+    const label = edgeLabelPoint(edge.points)
+    const left = (label.x - EDGE_LABEL_WIDTH / 2) * viewport.zoom + viewport.x
+    const right = (label.x + EDGE_LABEL_WIDTH / 2) * viewport.zoom + viewport.x
+    const top = (label.y - EDGE_LABEL_HEIGHT / 2) * viewport.zoom + viewport.y
+    const bottom = (label.y + EDGE_LABEL_HEIGHT / 2) * viewport.zoom + viewport.y
+    assert.ok(left >= 0 && right <= size.width, `${edge.id} label is clipped horizontally`)
+    assert.ok(top >= 0 && bottom <= size.height, `${edge.id} label is clipped vertically`)
+  }
 })
 
 test('truncation counts code points so emoji are never split', () => {
@@ -299,6 +447,23 @@ test('topology colors come from the palette with a visible elevation step', () =
   }
   assert.ok(contrast(palette['--card-border'], palette['--elev-3']) >= 3)
   assert.ok(contrast(palette['--edge'], cssVariables.get('--panel') ?? '') >= 3)
+  const glyph = cssVariables.get('--tile-glyph') ?? assert.fail('missing --tile-glyph')
+  for (const tile of TILE_VARS) {
+    const fill = cssVariables.get(tile) ?? assert.fail(`missing ${tile}`)
+    assert.ok(contrast(glyph, fill) >= 3, `${tile} glyph is low contrast`)
+  }
+  assert.ok(
+    contrast(
+      cssVariables.get('--edge-label-text') ?? '',
+      cssVariables.get('--edge-label-bg') ?? '',
+    ) >= 4.5,
+  )
+  assert.ok(
+    contrast(
+      cssVariables.get('--edge-label-border') ?? '',
+      cssVariables.get('--edge-label-bg') ?? '',
+    ) >= 3,
+  )
 
   const css = readFileSync(new URL('./topology.css', import.meta.url), 'utf8')
   for (const name of GRAPH_VARS) assert.ok(css.includes(`var(${name})`), `${name} is unused`)
@@ -309,7 +474,7 @@ test('a destroyed compound keeps its tint while destroyed cards fade', () => {
   const css = readFileSync(new URL('./topology.css', import.meta.url), 'utf8')
   assert.match(
     css,
-    /\.topology-node\.state-destroyed:not\(\.topology-compound\) rect\s*{[^}]*fill-opacity:/s,
+    /\.topology-node\.state-destroyed:not\(\.topology-compound\) > \.topology-node-surface\s*{[^}]*fill-opacity:/s,
   )
   const stateStyles = css.slice(
     css.indexOf('.topology-node.state-created'),
@@ -441,10 +606,34 @@ test('layoutTopology is finite, deterministic, enclosing, and stable across late
     )
   }
   for (const edge of late.edges) {
-    assert.ok(edge.points.length >= 2)
+    assert.equal(edge.points.length, 4)
     for (const point of edge.points) {
       assert.ok(Number.isFinite(point.x) && Number.isFinite(point.y), `${edge.id} has a non-finite point`)
     }
+    for (let index = 1; index < edge.points.length; index++) {
+      const [a, b] = [edge.points[index - 1], edge.points[index]]
+      assert.ok(a.x === b.x || a.y === b.y, `${edge.id} segment ${index} is diagonal`)
+    }
+
+    const source = late.nodes.get(edge.source) ?? assert.fail(`missing ${edge.source}`)
+    const target = late.nodes.get(edge.target) ?? assert.fail(`missing ${edge.target}`)
+    const onBoundary = (point: { x: number; y: number }, box: typeof source) =>
+      point.x >= box.x && point.x <= box.x + box.w &&
+      point.y >= box.y && point.y <= box.y + box.h &&
+      (point.x === box.x || point.x === box.x + box.w || point.y === box.y || point.y === box.y + box.h)
+    assert.ok(onBoundary(edge.points[0], source), `${edge.id} starts away from its source boundary`)
+    assert.ok(onBoundary(edge.points.at(-1) ?? assert.fail('missing endpoint'), target), `${edge.id} ends away from its target boundary`)
+
+    const segments = edge.points.slice(1).map((point, index) => [edge.points[index], point] as const)
+    const length = ([a, b]: (typeof segments)[number]) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y)
+    const longest = segments.reduce((best, segment) => length(segment) > length(best) ? segment : best)
+    const label = edgeLabelPoint(edge.points)
+    const [a, b] = longest
+    assert.ok(
+      (a.x === b.x && label.x === a.x && label.y >= Math.min(a.y, b.y) && label.y <= Math.max(a.y, b.y)) ||
+      (a.y === b.y && label.y === a.y && label.x >= Math.min(a.x, b.x) && label.x <= Math.max(a.x, b.x)),
+      `${edge.id} label is not on its longest segment`,
+    )
   }
 })
 
@@ -516,7 +705,13 @@ test('topology sources render text only, never markup or URIs', () => {
     assert.ok(!dataUri.test(safe), `${safe} should not be caught`)
   }
 
-  for (const file of ['topology.ts', 'TopologyPanel.tsx', 'SvgTopology.tsx', 'topology.css']) {
+  for (const file of [
+    'topology.ts',
+    'TopologyPanel.tsx',
+    'SvgTopology.tsx',
+    'TopologyGlyph.tsx',
+    'topology.css',
+  ]) {
     const source = readFileSync(new URL(`./${file}`, import.meta.url), 'utf8')
     assert.ok(!dataUri.test(source), `${file} builds a data: URI`)
     assert.ok(!source.includes('dangerouslySetInnerHTML'), `${file} injects HTML`)
