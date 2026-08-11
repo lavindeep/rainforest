@@ -120,8 +120,12 @@ LLM-generated changes · native SwiftUI app · unmanaged-resource discovery.
 ## Invariants (kept from day one — they're cheap)
 
 - Terraform runs as an argument-safe child process; never a shell string.
-- Opening a repo runs nothing; `init`, plan, and apply are explicit user
-  actions, with the exact command/cwd/workspace shown first.
+- Opening a repo never *changes* anything. Read-only state reads
+  (`terraform show -json`, `terraform version`) run automatically to render
+  the dashboard — with a remote backend that read uses Terraform's normal
+  credential chain over the network, same as running `terraform show` in a
+  terminal. `init`, plan, and apply are always explicit user actions, with
+  the exact command/cwd/workspace shown first.
 - Never `-lock=false`. Only the exact reviewed saved plan can be applied.
 - Credentials stay in Terraform's normal AWS chain (`~/.aws/`, SSO, env vars,
   set up outside Rain Forest); no login screen, no credential input, no
