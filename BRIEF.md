@@ -91,6 +91,11 @@ unless `--no-browser` is supplied.
   browser; raw plan/state JSON never leaves the Go process. Graph payloads
   contain only resource addresses, types, names, semantic kinds, topology
   relationships, and diff states.
+- Topology annotations are presentation-only: user labels and descriptions for
+  nodes and dependency edges never rename Terraform resources or change HCL or
+  state. They persist in the committable workspace-root
+  `rainforest.annotations.json`, keyed by Terraform address or stable dependency
+  edge ID, and apply across Current, Proposed, and Diff views.
 
 ### v0.2 — Edit + full loop
 

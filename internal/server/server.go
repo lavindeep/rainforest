@@ -34,6 +34,7 @@ type Server struct {
 	listener        net.Listener
 	handler         http.Handler
 	planMu          sync.Mutex
+	annotationsMu   sync.Mutex
 	terraformMu     sync.Mutex
 	plan            *planRun
 	planStarting    bool
@@ -81,6 +82,8 @@ func newWithFS(workspace, version string, dist fs.FS) (*Server, error) {
 	mux.HandleFunc("GET /api/workspace", s.scan)
 	mux.HandleFunc("GET /api/file", s.file)
 	mux.HandleFunc("GET /api/graph", s.graph)
+	mux.HandleFunc("GET /api/annotations", s.annotations)
+	mux.HandleFunc("PUT /api/annotations", s.annotations)
 	mux.HandleFunc("POST /api/plan", s.startPlan)
 	mux.HandleFunc("GET /api/plan/events", s.planEvents)
 	mux.HandleFunc("DELETE /api/plan", s.cancelPlan)
