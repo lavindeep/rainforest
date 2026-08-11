@@ -60,8 +60,9 @@ scroll-snap on a horizontal container; no windowing library.
 
 ### v0.1 — Plan review (read-only)
 
-`rainforest open <dir>` starts a local server on `127.0.0.1` (random port,
-per-launch session token, no wildcard CORS) and opens the browser.
+`rainforest open [--no-browser] [dir]` starts a local server on `127.0.0.1`
+(random port, per-launch session token, no wildcard CORS) and opens the browser
+unless `--no-browser` is supplied.
 
 - File/resource navigator from parsed HCL, with resource → file:line mapping.
 - Preflight panel on open: Terraform binary found + version, workspace
@@ -144,7 +145,7 @@ LLM-generated changes · native SwiftUI app · unmanaged-resource discovery.
 ## CLI
 
 ```text
-rainforest open [dir]      # start local dashboard
+rainforest open [--no-browser] [dir]  # start local dashboard
 rainforest version
 # later: rainforest analyze [dir] — headless sanitized JSON/Markdown report
 ```
