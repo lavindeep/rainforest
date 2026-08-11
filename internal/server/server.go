@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/lavindeep/rainforest/internal/workspace"
 	"github.com/lavindeep/rainforest/web"
@@ -33,9 +34,12 @@ type Server struct {
 	listener        net.Listener
 	handler         http.Handler
 	planMu          sync.Mutex
+	terraformMu     sync.Mutex
 	plan            *planRun
 	planStarting    bool
 	planStarts      sync.WaitGroup
+	graphRuns       sync.WaitGroup
+	graphPID        int
 	closed          bool
 	lifecycleCtx    context.Context
 	lifecycleCancel context.CancelFunc
@@ -76,6 +80,7 @@ func newWithFS(workspace, version string, dist fs.FS) (*Server, error) {
 	mux.HandleFunc("GET /api/preflight", s.preflight)
 	mux.HandleFunc("GET /api/workspace", s.scan)
 	mux.HandleFunc("GET /api/file", s.file)
+	mux.HandleFunc("GET /api/graph", s.graph)
 	mux.HandleFunc("POST /api/plan", s.startPlan)
 	mux.HandleFunc("GET /api/plan/events", s.planEvents)
 	mux.HandleFunc("DELETE /api/plan", s.cancelPlan)
@@ -99,14 +104,21 @@ func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		s.planMu.Lock()
 		s.closed = true
+		graphPID := s.graphPID
 		s.planMu.Unlock()
+		if graphPID > 0 {
+			if err := signalProcessGroup(graphPID, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+				s.closeErr = errors.Join(s.closeErr, err)
+			}
+		}
 		if s.lifecycleCancel != nil {
 			s.lifecycleCancel()
 		}
+		s.graphRuns.Wait()
 		s.planStarts.Wait()
 		planErr := s.closePlan()
 		listenerErr := s.listener.Close()
-		s.closeErr = errors.Join(planErr, listenerErr)
+		s.closeErr = errors.Join(s.closeErr, planErr, listenerErr)
 	})
 	return s.closeErr
 }

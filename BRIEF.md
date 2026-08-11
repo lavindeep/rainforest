@@ -28,8 +28,11 @@ direction.
 - **AWS semantic scope:** core networking only — VPC, subnet, route table/route/
   association, IGW, NAT, security groups + rules, EC2/ENI. Everything else renders
   as a generic node.
-- **Graph style:** a simple, clean flowchart. Every node — generic ones included —
-  gets a plain label (type + name/role) so it's always "known" for what it is.
+- **Graph style:** minimal and clean, explicitly not Packet Tracer. Rounded,
+  typography-first cards show a small resource type and prominent name without
+  vendor icons. Containment uses soft nested tints; dependency edges are thin
+  and gently curved. Color is reserved for diff meaning, while extra detail is
+  available on hover or selection.
 - **Layout:** persistent narrow navigator sidebar on the left; everything else in
   a horizontally scrolling pane strip (see Layout below).
 - **CLI philosophy:** the CLI stays minimal — initial setup, opening the dashboard,
@@ -69,14 +72,21 @@ per-launch session token, no wildcard CORS) and opens the browser.
   resource types — gets a simple label: resource type + name, so generic
   nodes are still "known" for what they are. Generic dependency edges for
   all resources; AWS core-networking resources additionally get containment
-  grouping (VPC ⊃ subnet ⊃ instance) and semantic styling.
+  grouping when exactly one parent is proven: VPC ⊃ subnet/route table/IGW/
+  security group and subnet ⊃ instance/ENI/NAT. Proposed is built from the
+  saved plan; Diff is the union of prior and proposed resources, marking
+  created/changed/replaced/destroyed nodes and opened/closed dependency edges.
+  Managed resources only are displayed, and unresolved relationships are
+  omitted rather than guessed.
 - Run `terraform plan -input=false -out=<file>` + `terraform show -json <file>`
   from the UI, stream output via SSE.
 - Simple yellow findings: SG rule open to 0.0.0.0/0, subnet routed to an IGW,
   resource destroyed/replaced by the plan, and similar single-resource checks.
 - Click node/finding → jump to HCL source (read-only view).
 - Redaction server-side: sensitive values stripped before anything reaches the
-  browser; raw plan/state JSON never leaves the Go process.
+  browser; raw plan/state JSON never leaves the Go process. Graph payloads
+  contain only resource addresses, types, names, semantic kinds, topology
+  relationships, and diff states.
 
 ### v0.2 — Edit + full loop
 
@@ -110,8 +120,12 @@ LLM-generated changes · native SwiftUI app · unmanaged-resource discovery.
 ## Invariants (kept from day one — they're cheap)
 
 - Terraform runs as an argument-safe child process; never a shell string.
-- Opening a repo runs nothing; `init`, plan, and apply are explicit user
-  actions, with the exact command/cwd/workspace shown first.
+- Opening a repo never *changes* anything. Read-only state reads
+  (`terraform show -json`, `terraform version`) run automatically to render
+  the dashboard — with a remote backend that read uses Terraform's normal
+  credential chain over the network, same as running `terraform show` in a
+  terminal. `init`, plan, and apply are always explicit user actions, with
+  the exact command/cwd/workspace shown first.
 - Never `-lock=false`. Only the exact reviewed saved plan can be applied.
 - Credentials stay in Terraform's normal AWS chain (`~/.aws/`, SSO, env vars,
   set up outside Rain Forest); no login screen, no credential input, no

@@ -6,11 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test": "node --test src/topology.test.ts",
     "lint": "oxlint",
     "typecheck": "tsc -b",
     "preview": "vite preview"
   },
   "dependencies": {
+    "cytoscape": "^3.34.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

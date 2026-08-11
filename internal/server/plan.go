@@ -22,8 +22,9 @@ import (
 )
 
 const (
-	maxPlanLines   = 10000
-	planTempPrefix = "rainforest-plan-"
+	maxPlanLines             = 10000
+	planTempPrefix           = "rainforest-plan-"
+	terraformShowInvalidJSON = "terraform show returned invalid JSON"
 )
 
 var (
@@ -89,6 +90,7 @@ type planRun struct {
 	lineStart        int
 	truncated        bool
 	summary          *planSummary
+	graphs           *planGraphs
 	err              string
 	seq              int
 	cwd              string
@@ -194,6 +196,8 @@ func (s *Server) startPlan(w http.ResponseWriter, _ *http.Request) {
 		}
 		s.planStarts.Done()
 	}()
+	s.terraformMu.Lock()
+	defer s.terraformMu.Unlock()
 
 	terraformPath, err := exec.LookPath("terraform")
 	if err != nil {
@@ -470,10 +474,19 @@ func (s *Server) showPlan(run *planRun) (*planSummary, bool) {
 	}
 	summary, err := parsePlanSummary(raw.Bytes())
 	if err != nil {
-		return &planSummary{Changes: []planChange{}, ShowError: "terraform show JSON: " + err.Error()}, false
+		log.Printf("parse terraform show summary JSON: %v", err)
+		return &planSummary{Changes: []planChange{}, ShowError: terraformShowInvalidJSON}, false
+	}
+	graphs, err := parsePlanGraphs(raw.Bytes())
+	if err != nil {
+		log.Printf("parse terraform show graph JSON: %v", err)
+		return &planSummary{Changes: []planChange{}, ShowError: terraformShowInvalidJSON}, false
 	}
 	s.planMu.Lock()
 	canceled = run.cancelRequested
+	if !canceled {
+		run.graphs = graphs
+	}
 	s.planMu.Unlock()
 	if canceled {
 		return nil, true
