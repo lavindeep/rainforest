@@ -81,7 +81,8 @@ unless `--no-browser` is supplied.
   saved plan; Diff is the union of prior and proposed resources, marking
   created/changed/replaced/destroyed nodes and opened/closed dependency edges.
   Managed resources only are displayed, and unresolved relationships are
-  omitted rather than guessed.
+  omitted rather than guessed. A cancelled view request cannot publish stale
+  graph data or layout positions after the user switches away.
 - Run `terraform plan -input=false -out=<file>` + `terraform show -json <file>`
   from the UI, stream output via SSE.
 - Simple yellow findings: SG rule open to 0.0.0.0/0, subnet routed to an IGW,

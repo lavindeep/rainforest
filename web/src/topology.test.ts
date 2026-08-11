@@ -972,6 +972,19 @@ test('running plan reuses Current instead of fetching during Terraform work', ()
   assert.equal(shouldFetchTopology('diff', false), true)
 })
 
+test('an aborted topology response cannot publish graph state or layout slots', () => {
+  const source = readFileSync(new URL('./TopologyPanel.tsx', import.meta.url), 'utf8')
+  const start = source.indexOf('const body = (await response.json()')
+  const end = source.indexOf('} catch (requestError)', start)
+  const responseHandler = source.slice(start, end)
+  const guard = responseHandler.indexOf('if (controller.signal.aborted) return')
+
+  assert.ok(start >= 0 && end > start)
+  assert.ok(guard >= 0, 'response handler must stop after an abort')
+  assert.ok(guard < responseHandler.indexOf('slots.current = canonicalSlots'))
+  assert.ok(guard < responseHandler.indexOf('setGraphs('))
+})
+
 const savedAnnotations: AnnotationsDocument = {
   version: 1,
   nodes: {

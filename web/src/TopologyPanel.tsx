@@ -134,6 +134,7 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
           signal: controller.signal,
         })
         const body = (await response.json().catch(() => ({}))) as GraphWireResponse & { error?: string }
+        if (controller.signal.aborted) return
         if (!response.ok) {
           setGraphs((current) => {
             const next = { ...current }
