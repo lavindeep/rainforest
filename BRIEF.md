@@ -90,7 +90,8 @@ unless `--no-browser` is supplied.
 - Redaction server-side: sensitive values stripped before anything reaches the
   browser; raw plan/state JSON never leaves the Go process. Graph payloads
   contain only resource addresses, types, names, semantic kinds, topology
-  relationships, and diff states.
+  relationships, and diff states; node and edge collections are JSON arrays,
+  including for empty views.
 - Topology annotations are presentation-only: user labels and descriptions for
   nodes and dependency edges never rename Terraform resources or change HCL or
   state. Selecting a node or labeled dependency edge opens a compact editor;

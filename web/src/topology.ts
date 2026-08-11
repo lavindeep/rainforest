@@ -111,6 +111,19 @@ export type GraphResponse = {
   edges: GraphEdge[]
 }
 
+export type GraphWireResponse = Omit<GraphResponse, 'nodes' | 'edges'> & {
+  nodes: GraphNode[] | null
+  edges: GraphEdge[] | null
+}
+
+export function normalizeGraphResponse(graph: GraphWireResponse): GraphResponse {
+  return {
+    ...graph,
+    nodes: graph.nodes ?? [],
+    edges: graph.edges ?? [],
+  }
+}
+
 type SourceBlock = {
   address: string
   file: string

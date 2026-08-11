@@ -16,6 +16,7 @@ import {
   fitViewport,
   layoutTopology,
   nodesByContainmentDepth,
+  normalizeGraphResponse,
   shouldFetchTopology,
   sceneForGraph,
   shouldMarkTopologyRunning,
@@ -84,6 +85,25 @@ const graph: GraphResponse = {
     },
   ],
 }
+
+test('graph responses normalize null collections to empty arrays', () => {
+  const normalized = normalizeGraphResponse({
+    view: 'proposed',
+    runId: 'run-empty',
+    nodes: null,
+    edges: null,
+  })
+
+  assert.deepEqual(normalized, {
+    view: 'proposed',
+    runId: 'run-empty',
+    nodes: [],
+    edges: [],
+  })
+  const scene = sceneForGraph(normalized)
+  assert.deepEqual(scene.nodes, [])
+  assert.deepEqual(scene.edges, [])
+})
 
 function node(id: string, kind: string, parent?: string): GraphNode {
   return {

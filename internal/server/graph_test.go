@@ -61,6 +61,20 @@ func graphByAddress(nodes []graphNode, address string) (graphNode, bool) {
 	return graphNode{}, false
 }
 
+func TestCloneGraphPreservesEmptyArrays(t *testing.T) {
+	cloned := cloneGraph(emptyGraph("diff"))
+	if cloned.Nodes == nil || cloned.Edges == nil {
+		t.Fatalf("cloneGraph empty slices = nodes:%v edges:%v, want non-nil arrays", cloned.Nodes, cloned.Edges)
+	}
+	raw, err := json.Marshal(cloned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"nodes":null`) || strings.Contains(string(raw), `"edges":null`) {
+		t.Fatalf("cloneGraph JSON = %s, want empty arrays", raw)
+	}
+}
+
 func TestGraphPlanViewsAreSanitizedStableAndClassified(t *testing.T) {
 	workspace := initializedWorkspace(t)
 	planScript(t, "exit 0", "printf '%s\\n' '"+graphPlanFixture+"'")

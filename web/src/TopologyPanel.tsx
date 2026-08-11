@@ -16,11 +16,13 @@ import {
   clipText,
   graphNodeForSelection,
   layoutTopology,
+  normalizeGraphResponse,
   sceneForGraph,
   shouldFetchTopology,
   sourceForAddress,
   type GraphNode,
   type GraphResponse,
+  type GraphWireResponse,
   type LayoutSlot,
   type TopologyPlanSignal,
   type TopologySelection,
@@ -131,7 +133,7 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
           credentials: 'same-origin',
           signal: controller.signal,
         })
-        const body = (await response.json().catch(() => ({}))) as GraphResponse & { error?: string }
+        const body = (await response.json().catch(() => ({}))) as GraphWireResponse & { error?: string }
         if (!response.ok) {
           setGraphs((current) => {
             const next = { ...current }
@@ -141,12 +143,13 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
           setError(graphError(requestedView, response.status, body.error))
           return
         }
+        const normalized = normalizeGraphResponse(body)
         if (requestedView === 'diff') {
           const canonicalSlots = new Map<string, LayoutSlot>()
-          layoutTopology(sceneForGraph(body), canonicalSlots)
+          layoutTopology(sceneForGraph(normalized), canonicalSlots)
           slots.current = canonicalSlots
         }
-        setGraphs((current) => ({ ...current, [requestedView]: body }))
+        setGraphs((current) => ({ ...current, [requestedView]: normalized }))
       } catch (requestError) {
         if ((requestError as Error).name !== 'AbortError') {
           setError('Could not reach the topology service')
