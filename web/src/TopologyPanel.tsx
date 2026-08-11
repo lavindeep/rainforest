@@ -1,7 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type { Scan } from './App'
+import AnnotationEditor from './AnnotationEditor'
 import SvgTopology from './SvgTopology'
 import './topology.css'
+import {
+  annotationFor,
+  annotationLabel,
+  annotationsReducer,
+  createAnnotationsState,
+  getAnnotations,
+  putAnnotations,
+} from './annotations'
+import type { AnnotationTarget } from './annotations'
 import {
   clipText,
   graphNodeForSelection,
@@ -13,6 +23,7 @@ import {
   type GraphResponse,
   type LayoutSlot,
   type TopologyPlanSignal,
+  type TopologySelection,
   type TopologyView,
 } from './topology'
 
@@ -43,7 +54,13 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
   const [error, setError] = useState('')
   const [refresh, setRefresh] = useState(0)
   const [hovered, setHovered] = useState<GraphNode | null>(null)
-  const [selected, setSelected] = useState<GraphNode | null>(null)
+  const [selected, setSelected] = useState<TopologySelection | null>(null)
+  const [annotations, dispatchAnnotations] = useReducer(
+    annotationsReducer,
+    undefined,
+    () => createAnnotationsState(),
+  )
+  const annotationRequest = useRef(0)
   const graph = graphs[view]
   // The three views arrive one response at a time, so this map is laid out
   // several times with a growing node list. Carrying the slots across those
@@ -52,6 +69,28 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
   const slots = useRef(new Map<string, LayoutSlot>())
   const scene = useMemo(() => (graph ? sceneForGraph(graph) : null), [graph])
   const layout = useMemo(() => (scene ? layoutTopology(scene, slots.current) : null), [scene])
+
+  useEffect(() => {
+    const requestId = ++annotationRequest.current
+    const revision = 0
+    dispatchAnnotations({ type: 'load-start', requestId, revision })
+    void getAnnotations().then(
+      (document) => dispatchAnnotations({
+        type: 'load-success',
+        requestId,
+        revision,
+        document,
+      }),
+      (requestError: unknown) => dispatchAnnotations({
+        type: 'load-failure',
+        requestId,
+        revision,
+        error: requestError instanceof Error
+          ? requestError.message
+          : 'Could not load topology annotations',
+      }),
+    )
+  }, [])
 
   useEffect(() => {
     if (planSignal.revision === 0) return
@@ -119,11 +158,38 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
     return () => controller.abort()
   }, [building, refresh, view])
 
-  const detail = selected ?? hovered
+  const selectedNode = selected?.kind === 'node'
+    ? graphNodeForSelection(graph?.nodes ?? [], selected.id)
+    : null
+  const selectedEdge = selected?.kind === 'edge'
+    ? scene?.edges.find((edge) => edge.id === selected.id) ?? null
+    : null
+  const detail = selected ? selectedNode : hovered
   const source = useMemo(
     () => (detail && scan ? sourceForAddress(detail.address, scan.blocks) : null),
     [detail, scan],
   )
+
+  function nodeLabel(node: GraphNode) {
+    return annotationLabel(annotations.document, { kind: 'node', key: node.address }, node.name)
+  }
+
+  function edgeLabel(id: string) {
+    return annotationLabel(annotations.document, { kind: 'edge', key: id }, 'depends on')
+  }
+
+  const selectedEdgeSource = selectedEdge
+    ? graphNodeForSelection(scene?.nodes ?? [], selectedEdge.source)
+    : null
+  const selectedEdgeTarget = selectedEdge
+    ? graphNodeForSelection(scene?.nodes ?? [], selectedEdge.target)
+    : null
+
+  const annotationTarget: AnnotationTarget | null = selectedNode
+    ? { kind: 'node', key: selectedNode.address }
+    : selectedEdge
+      ? { kind: 'edge', key: selectedEdge.id }
+      : null
 
   function choose(next: TopologyView) {
     setView(next)
@@ -133,8 +199,29 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
   }
 
   function selectResource(node: GraphNode | null) {
-    setSelected(node)
+    setSelected(node ? { kind: 'node', id: node.id } : null)
     setHovered(null)
+  }
+
+  async function saveAnnotations() {
+    if (!annotations.loaded || !annotations.dirty || annotations.savingRequest) return
+    const requestId = ++annotationRequest.current
+    const revision = annotations.revision
+    const document = annotations.document
+    dispatchAnnotations({ type: 'save-start', requestId, revision })
+    try {
+      const saved = await putAnnotations(document)
+      dispatchAnnotations({ type: 'save-success', requestId, revision, document: saved })
+    } catch (requestError) {
+      dispatchAnnotations({
+        type: 'save-failure',
+        requestId,
+        revision,
+        error: requestError instanceof Error
+          ? requestError.message
+          : 'Could not save topology annotations',
+      })
+    }
   }
 
   return (
@@ -156,7 +243,7 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
           <span>Resource</span>
           <select
             id="topology-resource"
-            value={selected?.id ?? ''}
+            value={selected?.kind === 'node' ? selected.id : ''}
             disabled={!graph || graph.nodes.length === 0}
             onChange={(event) =>
               selectResource(graphNodeForSelection(graph?.nodes ?? [], event.target.value))
@@ -165,7 +252,7 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
             <option value="">Inspect resource…</option>
             {graph?.nodes.map((node) => (
               <option key={node.id} value={node.id}>
-                {clipText(`${node.name} — ${node.type} (${node.address})`, 60)}
+                {clipText(`${nodeLabel(node)} — ${node.type} (${node.address})`, 60)}
               </option>
             ))}
           </select>
@@ -177,10 +264,15 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
           <SvgTopology
             scene={scene}
             layout={layout}
-            selectedId={selected?.id}
+            selected={selected}
             label={`${VIEWS.find((item) => item.id === view)?.label} infrastructure topology`}
+            nodeLabel={nodeLabel}
+            edgeLabel={(edge) => edgeLabel(edge.id)}
             onHover={setHovered}
-            onSelect={selectResource}
+            onSelect={(selection) => {
+              setSelected(selection)
+              setHovered(null)
+            }}
           />
         )}
         <div className="topology-status" role={error ? 'alert' : 'status'} aria-live="polite">
@@ -194,25 +286,64 @@ export default function TopologyPanel({ scan, planSignal, onSelectSource }: Prop
         </div>
       </div>
 
-      {detail && (
+      {(detail || selectedEdge) && (
         <aside className="topology-detail" aria-live="polite">
-          <div className="topology-detail-text">
-            <span className="topology-detail-type truncate" title={detail.type}>
-              {detail.type}
-            </span>
-            <strong className="truncate" title={detail.name}>
-              {detail.name}
-            </strong>
-            <code className="truncate" title={detail.address}>
-              {detail.address}
-            </code>
+          <div className="topology-detail-summary">
+            <div className="topology-detail-text">
+              {detail ? (
+                <>
+                  <span className="topology-detail-type truncate" title={detail.type}>
+                    {detail.type}
+                  </span>
+                  <strong className="truncate" title={nodeLabel(detail)}>
+                    {nodeLabel(detail)}
+                  </strong>
+                  <code className="truncate" title={detail.address}>
+                    {detail.address}
+                  </code>
+                </>
+              ) : selectedEdge ? (
+                <>
+                  <span className="topology-detail-type">Dependency</span>
+                  <strong className="truncate" title={edgeLabel(selectedEdge.id)}>
+                    {edgeLabel(selectedEdge.id)}
+                  </strong>
+                  <code
+                    className="truncate"
+                    title={`${selectedEdgeSource?.address ?? selectedEdge.source} → ${selectedEdgeTarget?.address ?? selectedEdge.target}`}
+                  >
+                    {selectedEdgeSource ? nodeLabel(selectedEdgeSource) : selectedEdge.source}
+                    {' → '}
+                    {selectedEdgeTarget ? nodeLabel(selectedEdgeTarget) : selectedEdge.target}
+                  </code>
+                </>
+              ) : null}
+            </div>
+            {detail && source ? (
+              <button type="button" onClick={() => onSelectSource(source.path, source.line)}>
+                Open source
+              </button>
+            ) : detail ? (
+              <span className="topology-source-unavailable">Source unavailable</span>
+            ) : null}
           </div>
-          {source ? (
-            <button type="button" onClick={() => onSelectSource(source.path, source.line)}>
-              Open source
-            </button>
-          ) : (
-            <span className="topology-source-unavailable">Source unavailable</span>
+          {selected && annotationTarget && (
+            <AnnotationEditor
+              kind={annotationTarget.kind}
+              defaultLabel={selectedNode?.name ?? 'depends on'}
+              annotation={annotationFor(annotations.document, annotationTarget)}
+              loaded={annotations.loaded}
+              dirty={annotations.dirty}
+              saving={annotations.savingRequest !== null}
+              saved={annotations.saved}
+              error={annotations.error}
+              onChange={(annotation) => dispatchAnnotations({
+                type: 'edit',
+                target: annotationTarget,
+                annotation,
+              })}
+              onSave={() => void saveAnnotations()}
+            />
           )}
         </aside>
       )}

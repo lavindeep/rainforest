@@ -39,6 +39,8 @@
 
 .topology-view:focus-visible,
 .topology-resource select:focus-visible,
+.topology-annotation input:focus-visible,
+.topology-annotation textarea:focus-visible,
 .topology-detail button:focus-visible {
   outline: 2px solid var(--text);
   outline-offset: 2px;
@@ -178,7 +180,6 @@
 
 .topology-node.selected > .topology-node-surface,
 .topology-node:focus-visible > .topology-node-surface {
-  stroke: var(--text);
   stroke-width: 3;
 }
 
@@ -188,8 +189,20 @@
   stroke-width: 1;
 }
 
+.topology-edge-group {
+  cursor: pointer;
+  outline: none;
+}
+
+.topology-edge-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 12;
+  pointer-events: stroke;
+}
+
 .topology-edge-label {
-  pointer-events: none;
+  pointer-events: all;
 }
 
 .topology-edge-label rect {
@@ -253,6 +266,18 @@
   fill: var(--red);
 }
 
+.topology-edge-group:hover .topology-edge,
+.topology-edge-group:focus-visible .topology-edge,
+.topology-edge-group.selected .topology-edge {
+  stroke-width: 3;
+}
+
+.topology-edge-group:focus-visible .topology-edge-label rect,
+.topology-edge-group.selected .topology-edge-label rect {
+  stroke: var(--text);
+  stroke-width: 2;
+}
+
 .topology-status {
   position: absolute;
   inset: 50% 16px auto;
@@ -270,7 +295,8 @@
   bottom: 12px;
   left: 12px;
   display: flex;
-  align-items: center;
+  align-items: stretch;
+  flex-direction: column;
   gap: 12px;
   min-width: 0;
   padding: 10px 12px;
@@ -278,6 +304,13 @@
   border-radius: 7px;
   background: var(--detail-bg);
   box-shadow: 0 6px 18px var(--shadow);
+}
+
+.topology-detail-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
 }
 
 .topology-detail-text {
@@ -304,4 +337,62 @@
   font: inherit;
   font-size: 11px;
   cursor: pointer;
+}
+
+.topology-annotation {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.topology-annotation-fields {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.8fr) minmax(150px, 1.2fr);
+  gap: 8px;
+}
+
+.topology-annotation label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.topology-annotation input,
+.topology-annotation textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+}
+
+.topology-annotation textarea {
+  min-height: 48px;
+  resize: vertical;
+}
+
+.topology-annotation input:disabled,
+.topology-annotation textarea:disabled,
+.topology-annotation button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.topology-annotation-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  font-size: 10px;
+}
+
+.topology-annotation-actions .hint {
+  margin-right: auto;
 }

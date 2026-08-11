@@ -13,6 +13,8 @@ import {
   sceneForGraph,
   zoomViewport,
   type GraphNode,
+  type GraphEdge,
+  type TopologySelection,
   type Viewport,
 } from './topology'
 import TopologyGlyph from './TopologyGlyph'
@@ -24,10 +26,12 @@ type Point = { x: number; y: number }
 type Props = {
   scene: Scene
   layout: Layout
-  selectedId?: string
+  selected: TopologySelection | null
   label: string
+  nodeLabel: (node: GraphNode) => string
+  edgeLabel: (edge: GraphEdge) => string
   onHover: (node: GraphNode | null) => void
-  onSelect: (node: GraphNode | null) => void
+  onSelect: (selection: TopologySelection | null) => void
 }
 
 const EMPTY_VIEWPORT: Viewport = { x: 0, y: 0, zoom: 1, owned: false }
@@ -44,8 +48,10 @@ function stateClass(state?: string) {
 export default function SvgTopology({
   scene,
   layout,
-  selectedId,
+  selected,
   label,
+  nodeLabel,
+  edgeLabel,
   onHover,
   onSelect,
 }: Props) {
@@ -57,6 +63,7 @@ export default function SvgTopology({
   const compounds = new Set(scene.nodes.flatMap((node) => (node.parent ? [node.parent] : [])))
   const compoundNodes = nodesByContainmentDepth(scene.nodes.filter((node) => compounds.has(node.id)))
   const leafNodes = scene.nodes.filter((node) => !compounds.has(node.id))
+  const nodes = new Map(scene.nodes.map((node) => [node.id, node]))
 
   useEffect(() => {
     const target = svg.current
@@ -127,10 +134,10 @@ export default function SvgTopology({
     drag.current = null
   }
 
-  function selectWithKeyboard(event: KeyboardEvent<SVGGElement>, node: GraphNode) {
+  function selectWithKeyboard(event: KeyboardEvent<SVGGElement>, selection: TopologySelection) {
     if (event.key !== 'Enter' && event.key !== ' ') return
     event.preventDefault()
-    onSelect(node)
+    onSelect(selection)
   }
 
   function nodeGroup(node: GraphNode, compound: boolean) {
@@ -141,14 +148,16 @@ export default function SvgTopology({
     const tileY = box.y + (compound ? 6 : 10)
     const textX = tileX + tileSize + (compound ? 7 : 10)
     const textLimit = compound ? LABEL_CHARS : LABEL_CHARS - 6
+    const displayLabel = nodeLabel(node)
+    const isSelected = selected?.kind === 'node' && selected.id === node.id
     return (
       <g
         key={node.id}
-        className={`topology-node${compound ? ' topology-compound' : ''}${stateClass(node.state)}${selectedId === node.id ? ' selected' : ''}`}
+        className={`topology-node${compound ? ' topology-compound' : ''}${stateClass(node.state)}${isSelected ? ' selected' : ''}`}
         role="button"
         tabIndex={0}
-        aria-label={`${node.type} ${node.name}`}
-        aria-pressed={selectedId === node.id}
+        aria-label={`${node.type} ${displayLabel}`}
+        aria-pressed={isSelected}
         onPointerEnter={() => onHover(node)}
         onPointerLeave={() => onHover(null)}
         onClick={() => {
@@ -156,9 +165,9 @@ export default function SvgTopology({
             suppressClick.current = false
             return
           }
-          onSelect(node)
+          onSelect({ kind: 'node', id: node.id })
         }}
-        onKeyDown={(event) => selectWithKeyboard(event, node)}
+        onKeyDown={(event) => selectWithKeyboard(event, { kind: 'node', id: node.id })}
       >
         <rect
           className="topology-node-surface"
@@ -192,7 +201,7 @@ export default function SvgTopology({
             x={textX}
             dy={compound ? '1.2em' : '1.55em'}
           >
-            {clipText(node.name, textLimit)}
+            {clipText(displayLabel, textLimit)}
           </tspan>
         </text>
       </g>
@@ -202,13 +211,37 @@ export default function SvgTopology({
   return (
     <svg ref={svg} className="topology-canvas" role="group" aria-label={label}>
       <defs>
-        <marker id="topology-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+        <marker
+          id="topology-arrow"
+          markerWidth="7"
+          markerHeight="7"
+          refX="6"
+          refY="3.5"
+          orient="auto"
+          markerUnits="userSpaceOnUse"
+        >
           <path d="M 0 0 L 7 3.5 L 0 7 Z" />
         </marker>
-        <marker id="topology-arrow-opened" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+        <marker
+          id="topology-arrow-opened"
+          markerWidth="7"
+          markerHeight="7"
+          refX="6"
+          refY="3.5"
+          orient="auto"
+          markerUnits="userSpaceOnUse"
+        >
           <path d="M 0 0 L 7 3.5 L 0 7 Z" />
         </marker>
-        <marker id="topology-arrow-closed" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+        <marker
+          id="topology-arrow-closed"
+          markerWidth="7"
+          markerHeight="7"
+          refX="6"
+          refY="3.5"
+          orient="auto"
+          markerUnits="userSpaceOnUse"
+        >
           <path d="M 0 0 L 7 3.5 L 0 7 Z" />
         </marker>
       </defs>
@@ -227,8 +260,22 @@ export default function SvgTopology({
         {compoundNodes.map((node) => nodeGroup(node, true))}
         {layout.edges.map((edge) => {
           const point = edgeLabelPoint(edge.points)
+          const displayLabel = edgeLabel(edge)
+          const source = nodes.get(edge.source)
+          const target = nodes.get(edge.target)
+          const isSelected = selected?.kind === 'edge' && selected.id === edge.id
           return (
-            <g key={edge.id} className="topology-edge-group">
+            <g
+              key={edge.id}
+              className={`topology-edge-group${isSelected ? ' selected' : ''}`}
+              role="button"
+              tabIndex={0}
+              aria-label={`${displayLabel}: ${source ? nodeLabel(source) : edge.source} to ${target ? nodeLabel(target) : edge.target}`}
+              aria-pressed={isSelected}
+              onClick={() => onSelect({ kind: 'edge', id: edge.id })}
+              onKeyDown={(event) => selectWithKeyboard(event, { kind: 'edge', id: edge.id })}
+            >
+              <path className="topology-edge-hit" d={pathFor(edge.points)} />
               <path
                 className={`topology-edge${stateClass(edge.state)}`}
                 d={pathFor(edge.points)}
@@ -246,7 +293,7 @@ export default function SvgTopology({
                   height={EDGE_LABEL_HEIGHT}
                   rx="4"
                 />
-                <text y="3" textAnchor="middle">depends on</text>
+                <text y="3" textAnchor="middle">{clipText(displayLabel, 10)}</text>
               </g>
             </g>
           )

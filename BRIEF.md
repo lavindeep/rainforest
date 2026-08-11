@@ -93,7 +93,9 @@ unless `--no-browser` is supplied.
   relationships, and diff states.
 - Topology annotations are presentation-only: user labels and descriptions for
   nodes and dependency edges never rename Terraform resources or change HCL or
-  state. They persist in the committable workspace-root
+  state. Selecting a node or labeled dependency edge opens a compact editor;
+  changes stay local until the user explicitly saves them. They persist in the
+  committable workspace-root
   `rainforest.annotations.json`, keyed by Terraform address or stable dependency
   edge ID, and apply across Current, Proposed, and Diff views.
 

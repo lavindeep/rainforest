@@ -1,5 +1,7 @@
 export type TopologyView = 'current' | 'proposed' | 'diff'
 
+export type TopologySelection = { kind: 'node' | 'edge'; id: string }
+
 export type TopologyPlanSignal = {
   kind: 'running' | 'settled' | 'changed'
   revision: number

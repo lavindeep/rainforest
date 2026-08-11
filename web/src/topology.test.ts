@@ -25,6 +25,18 @@ import {
   zoomViewport,
 } from './topology.ts'
 import type { GraphNode, GraphResponse, LayoutSlot, Viewport } from './topology.ts'
+import {
+  annotationFor,
+  annotationLabel,
+  annotationsReducer,
+  createAnnotationsState,
+  emptyAnnotationsDocument,
+  getAnnotations,
+  limitAnnotationText,
+  putAnnotations,
+  updateAnnotation,
+} from './annotations.ts'
+import type { AnnotationsDocument } from './annotations.ts'
 
 const graph: GraphResponse = {
   view: 'diff',
@@ -706,6 +718,8 @@ test('topology sources render text only, never markup or URIs', () => {
   }
 
   for (const file of [
+    'annotations.ts',
+    'AnnotationEditor.tsx',
     'topology.ts',
     'TopologyPanel.tsx',
     'SvgTopology.tsx',
@@ -812,4 +826,299 @@ test('running plan reuses Current instead of fetching during Terraform work', ()
   assert.equal(shouldFetchTopology('current', true), false)
   assert.equal(shouldFetchTopology('current', false), true)
   assert.equal(shouldFetchTopology('diff', false), true)
+})
+
+const savedAnnotations: AnnotationsDocument = {
+  version: 1,
+  nodes: {
+    orphan: { label: 'Keep me', description: 'Not in the active graph' },
+    edited: { label: 'Old', description: 'Old description' },
+  },
+  edges: { 'old-edge': { label: 'Traffic', description: '' } },
+}
+
+test('annotation updates preserve orphan entries and delete only an empty edited entry', () => {
+  const updated = updateAnnotation(savedAnnotations, { kind: 'node', key: 'edited' }, {
+    label: 'New',
+    description: 'New description',
+  })
+  const deleted = updateAnnotation(updated, { kind: 'node', key: 'edited' }, {
+    label: '',
+    description: '',
+  })
+
+  assert.deepEqual(annotationFor(updated, { kind: 'node', key: 'edited' }), {
+    label: 'New',
+    description: 'New description',
+  })
+  assert.deepEqual(deleted, {
+    version: 1,
+    nodes: { orphan: savedAnnotations.nodes.orphan },
+    edges: savedAnnotations.edges,
+  })
+  assert.deepEqual(annotationFor(deleted, { kind: 'edge', key: 'missing' }), {
+    label: '',
+    description: '',
+  })
+})
+
+test('annotation labels fall back for whitespace and text limits count code points', () => {
+  const whitespace = updateAnnotation(
+    emptyAnnotationsDocument(),
+    { kind: 'node', key: 'node' },
+    { label: '   ', description: '' },
+  )
+
+  assert.equal(annotationLabel(whitespace, { kind: 'node', key: 'node' }, 'default'), 'default')
+  assert.equal(limitAnnotationText('🙂'.repeat(81), 80), '🙂'.repeat(80))
+  assert.equal(limitAnnotationText('界'.repeat(4001), 4000), '界'.repeat(4000))
+})
+
+test('annotation GET and PUT use same-origin credentials and expose server errors', async () => {
+  const calls: Array<[RequestInfo | URL, RequestInit | undefined]> = []
+  const okFetch: typeof fetch = async (input, init) => {
+    calls.push([input, init])
+    return new Response(JSON.stringify(savedAnnotations), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+
+  assert.deepEqual(await getAnnotations(okFetch), savedAnnotations)
+  assert.deepEqual(await putAnnotations(emptyAnnotationsDocument(), okFetch), savedAnnotations)
+  assert.deepEqual(calls, [
+    ['/api/annotations', { credentials: 'same-origin' }],
+    ['/api/annotations', {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(emptyAnnotationsDocument()),
+    }],
+  ])
+
+  const denied: typeof fetch = async () => new Response(
+    JSON.stringify({ error: 'annotations file must be a regular file' }),
+    { status: 400, headers: { 'content-type': 'application/json' } },
+  )
+  await assert.rejects(() => getAnnotations(denied), /annotations file must be a regular file/)
+  await assert.rejects(() => putAnnotations(savedAnnotations, denied), /annotations file must be a regular file/)
+})
+
+test('annotation responses normalize omitted fields and reject invalid wire shapes', async () => {
+  const partial: typeof fetch = async () => new Response(JSON.stringify({
+    version: 1,
+    nodes: { labelOnly: { label: 'Label' }, empty: {} },
+    edges: { descriptionOnly: { description: 'Description' } },
+  }))
+  assert.deepEqual(await getAnnotations(partial), {
+    version: 1,
+    nodes: { labelOnly: { label: 'Label', description: '' } },
+    edges: { descriptionOnly: { label: '', description: 'Description' } },
+  })
+
+  for (const body of [
+    { version: 2, nodes: {}, edges: {} },
+    { version: 1, nodes: {}, edges: {}, extra: true },
+    { version: 1, nodes: null, edges: {} },
+    { version: 1, nodes: { '': { label: 'empty key' } }, edges: {} },
+    { version: 1, nodes: { ['x'.repeat(1025)]: { label: 'long key' } }, edges: {} },
+    { version: 1, nodes: { invalid: { label: 3 } }, edges: {} },
+    { version: 1, nodes: { invalid: { label: '🙂'.repeat(81) } }, edges: {} },
+    { version: 1, nodes: { invalid: { description: '界'.repeat(4001) } }, edges: {} },
+  ]) {
+    const invalid: typeof fetch = async () => new Response(JSON.stringify(body))
+    await assert.rejects(() => getAnnotations(invalid), /invalid annotations response/)
+  }
+})
+
+test('edge markers keep a fixed size and selected diff nodes keep their state color', () => {
+  const svg = readFileSync(new URL('./SvgTopology.tsx', import.meta.url), 'utf8')
+  assert.equal(svg.match(/markerUnits="userSpaceOnUse"/g)?.length, 3)
+
+  const css = readFileSync(new URL('./topology.css', import.meta.url), 'utf8')
+  const selected = [...css.matchAll(
+    /\.topology-node\.selected > \.topology-node-surface,[\s\S]*?\{([^}]*)\}/g,
+  )].at(-1)?.[1] ?? assert.fail('missing selected node style')
+  assert.doesNotMatch(selected, /stroke\s*:/)
+})
+
+test('annotation editor does not use UTF-16 maxLength limits', () => {
+  const source = readFileSync(new URL('./AnnotationEditor.tsx', import.meta.url), 'utf8')
+  assert.doesNotMatch(source, /\bmaxLength=/)
+})
+
+test('a delayed annotation load cannot overwrite an edit', () => {
+  let state = createAnnotationsState()
+  state = annotationsReducer(state, { type: 'load-start', requestId: 1, revision: 0 })
+  state = annotationsReducer(state, {
+    type: 'edit',
+    target: { kind: 'node', key: 'edited' },
+    annotation: { label: 'Local', description: '' },
+  })
+  state = annotationsReducer(state, {
+    type: 'load-success',
+    requestId: 1,
+    revision: 0,
+    document: savedAnnotations,
+  })
+
+  assert.equal(annotationFor(state.document, { kind: 'node', key: 'edited' }).label, 'Local')
+  assert.equal(state.dirty, true)
+  assert.equal(state.loaded, false)
+})
+
+test('an older same-revision load cannot overwrite the newest response', () => {
+  const newest: AnnotationsDocument = {
+    version: 1,
+    nodes: { newest: { label: 'Newest', description: '' } },
+    edges: {},
+  }
+  let state = createAnnotationsState()
+  state = annotationsReducer(state, { type: 'load-start', requestId: 1, revision: 0 })
+  state = annotationsReducer(state, { type: 'load-start', requestId: 2, revision: 0 })
+  state = annotationsReducer(state, {
+    type: 'load-success',
+    requestId: 2,
+    revision: 0,
+    document: newest,
+  })
+  state = annotationsReducer(state, {
+    type: 'load-success',
+    requestId: 1,
+    revision: 0,
+    document: savedAnnotations,
+  })
+
+  assert.deepEqual(state.document, newest)
+  assert.equal(state.loaded, true)
+})
+
+test('a current load failure leaves annotations unavailable for saving', () => {
+  let state = createAnnotationsState(savedAnnotations)
+  state = annotationsReducer(state, { type: 'load-start', requestId: 1, revision: 0 })
+  state = annotationsReducer(state, {
+    type: 'load-failure',
+    requestId: 1,
+    revision: 0,
+    error: 'cannot read annotations file',
+  })
+
+  assert.equal(state.loaded, false)
+  assert.equal(state.saved, false)
+  assert.equal(state.error, 'cannot read annotations file')
+})
+
+test('editing during a save keeps dirty state when the older response arrives', () => {
+  let state = createAnnotationsState(savedAnnotations)
+  state = annotationsReducer(state, {
+    type: 'edit',
+    target: { kind: 'node', key: 'edited' },
+    annotation: { label: 'First edit', description: '' },
+  })
+  state = annotationsReducer(state, { type: 'save-start', requestId: 1, revision: state.revision })
+  const savingRevision = state.revision
+  state = annotationsReducer(state, {
+    type: 'edit',
+    target: { kind: 'node', key: 'edited' },
+    annotation: { label: 'Newer edit', description: '' },
+  })
+  state = annotationsReducer(state, {
+    type: 'save-success',
+    requestId: 1,
+    revision: savingRevision,
+    document: savedAnnotations,
+  })
+
+  assert.equal(annotationFor(state.document, { kind: 'node', key: 'edited' }).label, 'Newer edit')
+  assert.equal(state.dirty, true)
+  assert.equal(state.saved, false)
+})
+
+test('an older same-revision save cannot overwrite the newest response', () => {
+  const newest = updateAnnotation(savedAnnotations, { kind: 'node', key: 'edited' }, {
+    label: 'Normalized newest',
+    description: '',
+  })
+  let state = createAnnotationsState(savedAnnotations)
+  state = annotationsReducer(state, {
+    type: 'edit',
+    target: { kind: 'node', key: 'edited' },
+    annotation: { label: 'Draft', description: '' },
+  })
+  state = annotationsReducer(state, { type: 'save-start', requestId: 1, revision: 1 })
+  state = annotationsReducer(state, { type: 'save-start', requestId: 2, revision: 1 })
+  state = annotationsReducer(state, {
+    type: 'save-success',
+    requestId: 2,
+    revision: 1,
+    document: newest,
+  })
+  state = annotationsReducer(state, {
+    type: 'save-success',
+    requestId: 1,
+    revision: 1,
+    document: savedAnnotations,
+  })
+
+  assert.deepEqual(state.document, newest)
+  assert.equal(state.saved, true)
+})
+
+test('failed annotation saves retain edits and surface the error', () => {
+  let state = createAnnotationsState(savedAnnotations)
+  state = annotationsReducer(state, {
+    type: 'edit',
+    target: { kind: 'edge', key: 'old-edge' },
+    annotation: { label: 'Edited traffic', description: '' },
+  })
+  state = annotationsReducer(state, { type: 'save-start', requestId: 1, revision: state.revision })
+  state = annotationsReducer(state, {
+    type: 'save-failure',
+    requestId: 1,
+    revision: state.revision,
+    error: 'disk full',
+  })
+
+  assert.equal(annotationFor(state.document, { kind: 'edge', key: 'old-edge' }).label, 'Edited traffic')
+  assert.equal(state.dirty, true)
+  assert.equal(state.error, 'disk full')
+  assert.equal(state.saved, false)
+})
+
+test('successful saves accept normalization and a fresh load restores the saved document', () => {
+  let state = createAnnotationsState(savedAnnotations)
+  state = annotationsReducer(state, {
+    type: 'edit',
+    target: { kind: 'node', key: 'edited' },
+    annotation: { label: '', description: '' },
+  })
+  state = annotationsReducer(state, { type: 'save-start', requestId: 1, revision: state.revision })
+  const normalized = updateAnnotation(savedAnnotations, { kind: 'node', key: 'edited' }, {
+    label: '',
+    description: '',
+  })
+  state = annotationsReducer(state, {
+    type: 'save-success',
+    requestId: 1,
+    revision: state.revision,
+    document: normalized,
+  })
+
+  assert.deepEqual(state.document, normalized)
+  assert.equal(state.dirty, false)
+  assert.equal(state.error, '')
+  assert.equal(state.saved, true)
+
+  let restored = createAnnotationsState()
+  restored = annotationsReducer(restored, { type: 'load-start', requestId: 1, revision: 0 })
+  restored = annotationsReducer(restored, {
+    type: 'load-success',
+    requestId: 1,
+    revision: 0,
+    document: normalized,
+  })
+  assert.deepEqual(restored.document, normalized)
+  assert.equal(restored.dirty, false)
+  assert.equal(restored.loaded, true)
+  assert.equal(restored.saved, false)
 })
